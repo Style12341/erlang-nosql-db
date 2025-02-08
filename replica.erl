@@ -1,6 +1,6 @@
 -module(replica).
 -behaviour(gen_server).
--define(DELETE_VALUE, "7ae9849f-ca8f-460a-9c68-b43745f62f00").
+-define(DELETE_VALUE, n2FlOTg0OWYtY2E4Zi00NjBhLTljNjgtYjQzNzQ1ZjYyZjAw).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([start/2, stop/1, put/5, del/4, get/3]).
 
