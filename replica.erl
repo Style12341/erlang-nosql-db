@@ -78,5 +78,7 @@ compare_values({ok,_,Ts} = BestValue,{ko,BestTs}) when Ts>BestTs -> BestValue;
 compare_values({ok,_,_},{ko,_} = BestValue)  -> BestValue;
 compare_values({ok,_,Ts} = BestValue,{ok,_,BestTs}) when Ts>BestTs -> BestValue;
 compare_values({ok,_,_},{ok,_,_} = BestValue)-> BestValue;
-compare_values({ko,_} = Arg2,{ok,_,_} = Arg1) -> compare_values(Arg1,Arg2).
+compare_values({ko,_} = Arg2,{ok,_,_} = Arg1) -> compare_values(Arg1,Arg2);
+compare_values({not_found},BestValue) -> BestValue;
+compare_values(BestValue,{not_found}) -> BestValue.
 
