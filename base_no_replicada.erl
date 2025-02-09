@@ -29,14 +29,16 @@ handle_call({get, Key}, _From, Data) ->
 handle_call({put, Key, Value, Ts}, _From, Data) ->
     case get_value(Key, Data) of
         {ok, _, OldTs} when OldTs > Ts -> {reply, {ko}, Data};
+        {ko,OldTs} when OldTs > Ts -> {reply, {not_found}, Data};
         _ -> {reply, {ok}, dict:store(Key, {Value, Ts}, Data)}
     end;
 handle_call({del, Key, Ts}, _From, Data) ->
     case get_value(Key, Data) of
+        {ko,OldTs} when OldTs > Ts-> {reply, {not_found}, Data};
+        {ko,_} -> {reply, {not_found}, delete_value(Key, Ts, Data)};
         {ok, _, OldTs} when OldTs > Ts -> {reply, {ko}, Data};
         {ok, _, _} -> {reply, {ok}, delete_value(Key, Ts, Data)};
-        {not_found} -> {reply, {not_found}, Data};
-        _ -> {reply, {ok}, delete_value(Key, Ts, Data)}
+        {not_found} -> {reply, {not_found}, delete_value(Key, Ts, Data)}
     end;
 handle_call(size, _From, Data) ->
     {reply, count_if_not_deleted_value(Data), Data}.
@@ -49,7 +51,7 @@ handle_info(_Info, Data) ->
 
 get_value(Key, Data) ->
     case dict:find(Key, Data) of
-        {ok, {?DELETE_VALUE, _}} -> {ko};
+        {ok, {?DELETE_VALUE, Ts}} -> {ko,Ts};
         {ok, {Val, Ts}} -> {ok, Val, Ts};
         _ -> {not_found}
     end.
