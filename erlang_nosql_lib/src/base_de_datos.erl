@@ -1,43 +1,53 @@
+%%%% filepath: /g:/Other computers/My Computer/DriveSynced/UTN/Programacion Concurrente/Erlang/erlang-nosql-db/erlang_nosql_lib/src/base_de_datos.erl
 -module(base_de_datos).
--export[start/2,stop/0,loop/2].
+-behaviour(supervisor).
 
-start(Name,CantReplicas) ->
-    Names=generate_replicas_names(Name,CantReplicas,[]),
-    start_replicas(Names,Names),
-    PID = spawn(?MODULE,loop,[Name,CantReplicas]),
-    register(?MODULE,PID).
+%% API
+-export([start_link/2, stop/0]).
+
+%% Supervisor callbacks
+-export([init/1]).
+
+%% Utility functions used in child specs
+-export([generate_replicas_names/3, generate_correct_arguments/2]).
+
+%%--------------------------------------------------------------------
+%% API functions
+%%--------------------------------------------------------------------
+start_link(Name, CantReplicas) ->
+    %% Register the supervisor as 'nosql_db'
+    supervisor:start_link({local, nosql_db}, ?MODULE, {Name, CantReplicas}).
 
 stop() ->
-    ?MODULE ! stop.
+    supervisor:stop(nosql_db).
 
-loop(Name, CantReplicas) ->
-    receive
-        stop -> stop_replicas(Name, CantReplicas)
-    end.
+%%--------------------------------------------------------------------
+%% Supervisor callbacks
+%%--------------------------------------------------------------------
+init({SupName, CantReplicas}) ->
+    %% Generate a list of replica names
+    Names = generate_replicas_names(SupName, CantReplicas, []),
+    %% Build a child spec for each replica. Each replica receives its own Name and a list of other replicas.
+    ChildSpecs = [child_spec(RepName, Names) || RepName <- Names],
+    %% one_for_one: if a child crashes, only that child is restarted.
+    {ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
-stop_replicas(Name, CantReplicas) ->
-    Names = generate_replicas_names(Name, CantReplicas, []),
-    stop_replicas(Names).
+child_spec(Name, ListNames) ->
+    %% Compute the correct arguments: [Name, ListOfOtherReplicas]
+    CorrectArgs = generate_correct_arguments(Name, ListNames),
+    %% The child spec will call replica:start_link/2 with a permanent restart type
+    {Name, {replica, start, CorrectArgs}, permanent, 5000, worker, [replica]}.
 
-stop_replicas([]) ->
-    ok;
-stop_replicas([CurrName | LeftNames]) ->
-    replica:stop(CurrName),
-    stop_replicas(LeftNames).
-
-start_replicas([],_) ->
-    ok;
-start_replicas([CurrName | LeftNames], Names) ->
-    [CurrName, ListNames] = generate_correct_arguments(CurrName, Names),
-    replica:start(CurrName, ListNames),
-    start_replicas(LeftNames, Names).
-
-generate_correct_arguments(Name, ListNames) ->
-    NewListNames = lists:subtract(ListNames, [Name]),
-    [Name, NewListNames].
-
+%%--------------------------------------------------------------------
+%% Replica name utilities
+%%--------------------------------------------------------------------
 generate_replicas_names(_, 0, Names) ->
     Names;
-generate_replicas_names(Name, CantReplicas, Names) when CantReplicas > 0 ->
-    NewName = list_to_atom(Name ++ "_" ++ integer_to_list(CantReplicas)),
-    generate_replicas_names(Name, CantReplicas - 1, [NewName | Names]).
+generate_replicas_names(BaseName, CantReplicas, Names) when CantReplicas > 0 ->
+    NewName = list_to_atom(BaseName ++ "_" ++ integer_to_list(CantReplicas)),
+    generate_replicas_names(BaseName, CantReplicas - 1, [NewName | Names]).
+
+generate_correct_arguments(Name, ListNames) ->
+    %% Remove the current name from the full list
+    NewListNames = lists:subtract(ListNames, [Name]),
+    [Name, NewListNames].
