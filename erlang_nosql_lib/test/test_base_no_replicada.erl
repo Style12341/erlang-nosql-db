@@ -27,7 +27,7 @@ del_test() ->
     Ts = 1,
     base_no_replicada:put(Key, Value, Ts),
     ?assertEqual({ok}, base_no_replicada:del(Key, Ts)),
-    ?assertEqual({ko}, base_no_replicada:get(Key)),
+    ?assertEqual({ko, Ts}, base_no_replicada:get(Key)),
     base_no_replicada:stop().
 
 size_test() ->
