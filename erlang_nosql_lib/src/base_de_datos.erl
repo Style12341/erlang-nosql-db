@@ -48,6 +48,10 @@ generate_replicas_names(BaseName, CantReplicas, Names) when CantReplicas > 0 ->
     generate_replicas_names(BaseName, CantReplicas - 1, [NewName | Names]).
 
 generate_correct_arguments(Name, ListNames) ->
-    %% Remove the current name from the full list
-    NewListNames = lists:subtract(ListNames, [Name]),
+    %% Get Current index of name if name is name_1 then index is 0
+    NewListNames = generate_ring(Name, ListNames, []),
     [Name, NewListNames].
+generate_ring(Name, [Name | Rest], HeadNames) ->
+    Rest ++ HeadNames;
+generate_ring(Name, [Curr | Rest], HeadNames) ->
+    generate_ring(Name, Rest, HeadNames ++ [Curr]).
