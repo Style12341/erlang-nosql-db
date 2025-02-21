@@ -16,16 +16,17 @@
 %%--------------------------------------------------------------------
 start(Name, CantReplicas) when is_atom(Name) ->
     %% Register the supervisor as 'nosql_db'
-    supervisor:start_link({local, Name}, ?MODULE, {Name, CantReplicas});
+    NewName = atom_to_list(Name),
+    supervisor:start_link({local, Name}, ?MODULE, {NewName, CantReplicas});
 start(Name, CantReplicas) ->
     NewName = list_to_atom(Name),
     supervisor:start_link({local, NewName}, ?MODULE, {Name, CantReplicas}).
 
 stop(Name) when is_atom(Name) ->
-    supervisor:stop(Name);
+    exit(whereis(Name), shutdown);
 stop(Name) ->
     NewName = list_to_atom(Name),
-    supervisor:stop(NewName).
+    exit(whereis(NewName), shutdown).
 
 %%--------------------------------------------------------------------
 %% Supervisor callbacks
