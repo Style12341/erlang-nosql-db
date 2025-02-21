@@ -91,36 +91,36 @@ replica_del(PidCoordinador, Ref, Key, Ts, Replica) ->
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] put: Key=~p, Value=~p, Ts=~p, Cons=~p~n", [Key, Value, Ts, Cons]),
     {Pid, _} = From,
-    NewOrderData = generate_order(Pid, ListReplicas, Cons, OrderData, put),
+    NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, put),
     NewShinyData = new_order(Pid, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({replica_put, Key, Value, Ts, PidCoordinador, Ref}, _, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] replica_put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     {BestValue, NewData} = put_value(Key, Value, Ts, Data),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
     {reply, ok, {NewData, ListReplicas, OrderData}};
 handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] del: Key=~p, Ts=~p, Cons=~p~n", [Key, Ts, Cons]),
     {Pid, _} = From,
-    NewOrderData = generate_order(Pid, ListReplicas, Cons, OrderData, del),
+    NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, del),
     NewShinyData = new_order(Pid, {Key, Ts}, Data, Cons, ListReplicas, del),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({replica_del, Key, Ts, PidCoordinador, Ref}, _, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] replica_del: Key=~p, Ts=~p~n", [Key, Ts]),
     {BestValue, NewData} = delete_value(Key, Ts, Data),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
     {reply, ok, {NewData, ListReplicas, OrderData}};
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] get: Key=~p, Cons=~p~n", [Key, Cons]),
     % Pid -> {get, ExpectedResponses, Responses, BestValue}
     {Pid, _} = From,
-    NewOrderData = generate_order(Pid, ListReplicas, Cons, OrderData, get),
+    NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, get),
     NewShinyData = new_order(Pid, {Key}, Data, Cons, ListReplicas, get),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({replica_get, PidCoordinador, Ref, Key}, _, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] replica_get: Key=~p CoordinatorPid=~p~n", [Key, PidCoordinador]),
     Value = get_value(Key, Data),
-    PidCoordinador ! {fulfill_order, Ref, Value},
+    PidCoordinador ! {fulfill_order, self(), Ref, Value},
     {reply, ok, {Data, ListReplicas, OrderData}}.
 
 %% @doc
@@ -132,43 +132,71 @@ handle_cast(stop, _State) ->
 %% @doc
 %% Handles the info messages for the gen_server.
 %% @spec handle_info(tuple(), {dict(), list(), dict()}) -> {noreply, {dict(), list(), dict()}}
-handle_info({fulfill_order, Ref, Value} = Info, {Data, ReplicaList, OrderData} = State) ->
+handle_info({fulfill_order, SenderPid, Ref, Value} = Info, {Data, ReplicaList, OrderData} = State) ->
     % Print the value
     io:format("[handle_info] fulfillorder: info: ~p state: ~p pidReceiver: ~p~n", [
         Info, State, self()
     ]),
-    {Op, ExpectedResponses, Responses, BestValue} = dict:fetch(Ref, OrderData),
+    {Op, ExpectedResponses, Responses, BestValue, Key} = dict:fetch(Ref, OrderData),
     io:format(
         "[handle_info] fulfillorder: Op=~p, ExpectedResponses=~p, Responses=~p, BestValue=~p~n", [
             Op, ExpectedResponses, Responses, BestValue
         ]
     ),
     NewBestValue = compare_values(Value, BestValue),
+    ensure_sender_consistency(SenderPid, Key, Value, NewBestValue),
     % PidNode ! {reply, NewBestValue},
     NewResponses = Responses + 1,
     case NewResponses of
         ExpectedResponses ->
             io:format("[handle_info] Answering Value: ~p to PID ~p~n", [ExpectedResponses, Ref]),
             Ref ! {reply, NewBestValue},
+            NewData = ensure_consistency(Op, Key, NewBestValue, Data),
             NewOrderData = dict:erase(Ref, OrderData);
         _ ->
             NewOrderData = dict:store(
-                Ref, {Op, ExpectedResponses, NewResponses, NewBestValue}, OrderData
-            )
+                Ref, {Op, ExpectedResponses, NewResponses, NewBestValue, Key}, OrderData
+            ),
+            NewData = Data
     end,
-    {noreply, {Data, ReplicaList, NewOrderData}};
+    {noreply, {NewData, ReplicaList, NewOrderData}};
+handle_info({fix_get_consistency, Key, Value}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_info] fix_get_consistency: Key=~p, Value=~p~n", [Key, Value]),
+    NewData = ensure_consistency(get, Key, Value, Data),
+    {noreply, {NewData, ListReplicas, OrderData}};
 handle_info(_Info, State) ->
     io:format("[handle_info] unknown info: ~p state: ~p pidReceiver: ~p~n", [_Info, State, self()]),
     {noreply, State}.
 
+ensure_sender_consistency(SenderPID, Key, Value, NewBestValue) ->
+    io:format("[ensure_sender_consistency] SenderPID=~p, Key=~p, Value=~p, NewBestValue=~p~n", [
+        SenderPID, Key, Value, NewBestValue
+    ]),
+    case Value of
+        NewBestValue ->
+            {consistent};
+        _ ->
+            SenderPID ! {fix_get_consistency, Key, NewBestValue},
+            {inconsistent}
+    end.
+
+ensure_consistency(get, Key, {ok, Val, Ts}, Data) ->
+    put_value(Key, Val, Ts, Data);
+% Best value was deleted at Ts
+ensure_consistency(get, Key, {ko, Ts}, Data) ->
+    delete_value(Key, Ts, Data);
+ensure_consistency(get, _, {not_found}, Data) ->
+    Data;
+ensure_consistency(_, _, _, Data) ->
+    Data.
 %% @doc
 %% Generates a new order for the given reference.
 %% @spec generate_order(reference(), list(), atom(), dict(), atom()) -> dict()
-generate_order(Ref, ListReplicas, Consistency, OrderData, Op) ->
+generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
     io:format("[generate_order] Ref=~p, Consistency=~p, Op=~p~n", [Ref, Consistency, Op]),
     dict:store(
         Ref,
-        {Op, get_expected_responses(length(ListReplicas), Consistency), 0, {not_found}},
+        {Op, get_expected_responses(length(ListReplicas), Consistency), 0, {not_found}, Key},
         OrderData
     ).
 
@@ -186,17 +214,18 @@ get_expected_responses(Length, Consistency) ->
 %% @doc
 %% Creates a new order based on the consistency level.
 %% @spec new_order(reference(), tuple(), dict(), atom(), list(), atom()) -> dict()
-new_order(Ref, OpData, Data, one, _, Op) ->
+new_order(Ref, OpData, Data, one, ListReplicas, Op) ->
     io:format("[new_order] one: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    propagate_operation(Op, OpData, ListReplicas),
     NewData;
 new_order(Ref, OpData, Data, quorum, ListReplicas, Op) ->
     io:format("[new_order] quorum: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
     Size = length(ListReplicas) div 2,
     NewList = lists:sublist(ListReplicas, Size),
     io:format("[new_order] quorum: Size=~p, NewList=~p~n", [Size, NewList]),
@@ -208,7 +237,7 @@ new_order(Ref, OpData, Data, all, ListReplicas, Op) ->
     io:format("[new_order] all: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
     request_order_fullfilment(Ref, PidCoordinador, OpData, ListReplicas, Op),
     NewData.
 
