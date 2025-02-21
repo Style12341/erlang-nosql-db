@@ -117,17 +117,17 @@ handle_cast({replica_put, Key, Value, Ts, PidCoordinador, Ref}, {Data, ListRepli
     io:format("[handle_call] replica_put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     {BestValue, NewData} = put_value(Key, Value, Ts, Data),
     PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
-    {reply, ok, {NewData, ListReplicas, OrderData}};
+    {noreply, {NewData, ListReplicas, OrderData}};
 handle_cast({replica_del, Key, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] replica_del: Key=~p, Ts=~p~n", [Key, Ts]),
     {BestValue, NewData} = delete_value(Key, Ts, Data),
     PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
-    {reply, ok, {NewData, ListReplicas, OrderData}};
+    {noreply, {NewData, ListReplicas, OrderData}};
 handle_cast({replica_get, PidCoordinador, Ref, Key}, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] replica_get: Key=~p CoordinatorPid=~p~n", [Key, PidCoordinador]),
     Value = get_value(Key, Data),
     PidCoordinador ! {fulfill_order, self(), Ref, Value},
-    {reply, ok, {Data, ListReplicas, OrderData}};
+    {noreply, {Data, ListReplicas, OrderData}};
 handle_cast(stop, _State) ->
     {stop, normal, ok}.
 
