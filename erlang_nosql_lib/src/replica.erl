@@ -65,7 +65,7 @@ replica_get(PidCoordinador, Ref, Key, Replica) ->
     io:format("[replica_get] PidCoordinador=~p, Ref=~p, Key=~p, Replica=~p~n", [
         PidCoordinador, Ref, Key, Replica
     ]),
-    gen_server:call(Replica, {replica_get, PidCoordinador, Ref, Key}).
+    gen_server:cast(Replica, {replica_get, PidCoordinador, Ref, Key}).
 
 %% @doc
 %% Handles the put request from a replica.
@@ -74,7 +74,7 @@ replica_put(PidCoordinador, Ref, Key, Value, Ts, Replica) ->
     io:format("[replica_put] PidCoordinador=~p, Ref=~p, Key=~p, Value=~p, Ts=~p, Replica=~p~n", [
         PidCoordinador, Ref, Key, Value, Ts, Replica
     ]),
-    gen_server:call(Replica, {replica_put, Key, Value, Ts, PidCoordinador, Ref}).
+    gen_server:cast(Replica, {replica_put, Key, Value, Ts, PidCoordinador, Ref}).
 
 %% @doc
 %% Handles the delete request from a replica.
@@ -83,7 +83,7 @@ replica_del(PidCoordinador, Ref, Key, Ts, Replica) ->
     io:format("[replica_del] PidCoordinador=~p, Ref=~p, Key=~p, Ts=~p, Replica=~p~n", [
         PidCoordinador, Ref, Key, Ts, Replica
     ]),
-    gen_server:call(Replica, {replica_del, Key, Ts, PidCoordinador, Ref}).
+    gen_server:cast(Replica, {replica_del, Key, Ts, PidCoordinador, Ref}).
 
 %% @doc
 %% Handles the call messages for the gen_server.
@@ -94,38 +94,40 @@ handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) 
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, put),
     NewShinyData = new_order(Pid, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-handle_call({replica_put, Key, Value, Ts, PidCoordinador, Ref}, _, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
-    {BestValue, NewData} = put_value(Key, Value, Ts, Data),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
-    {reply, ok, {NewData, ListReplicas, OrderData}};
+
 handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] del: Key=~p, Ts=~p, Cons=~p~n", [Key, Ts, Cons]),
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, del),
     NewShinyData = new_order(Pid, {Key, Ts}, Data, Cons, ListReplicas, del),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-handle_call({replica_del, Key, Ts, PidCoordinador, Ref}, _, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_del: Key=~p, Ts=~p~n", [Key, Ts]),
-    {BestValue, NewData} = delete_value(Key, Ts, Data),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
-    {reply, ok, {NewData, ListReplicas, OrderData}};
+
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
     io:format("[handle_call] get: Key=~p, Cons=~p~n", [Key, Cons]),
     % Pid -> {get, ExpectedResponses, Responses, BestValue}
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, get),
     NewShinyData = new_order(Pid, {Key}, Data, Cons, ListReplicas, get),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-handle_call({replica_get, PidCoordinador, Ref, Key}, _, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_get: Key=~p CoordinatorPid=~p~n", [Key, PidCoordinador]),
-    Value = get_value(Key, Data),
-    PidCoordinador ! {fulfill_order, self(), Ref, Value},
-    {reply, ok, {Data, ListReplicas, OrderData}}.
+    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}}.
 
 %% @doc
 %% Handles the cast messages for the gen_server.
 %% @spec handle_cast(atom(), any()) -> {stop, normal, ok}
+handle_cast({replica_put, Key, Value, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_call] replica_put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
+    {BestValue, NewData} = put_value(Key, Value, Ts, Data),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    {reply, ok, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_del, Key, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_call] replica_del: Key=~p, Ts=~p~n", [Key, Ts]),
+    {BestValue, NewData} = delete_value(Key, Ts, Data),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    {reply, ok, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_get, PidCoordinador, Ref, Key}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_call] replica_get: Key=~p CoordinatorPid=~p~n", [Key, PidCoordinador]),
+    Value = get_value(Key, Data),
+    PidCoordinador ! {fulfill_order, self(), Ref, Value},
+    {reply, ok, {Data, ListReplicas, OrderData}};
 handle_cast(stop, _State) ->
     {stop, normal, ok}.
 

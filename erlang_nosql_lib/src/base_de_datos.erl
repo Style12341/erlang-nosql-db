@@ -3,7 +3,7 @@
 -behaviour(supervisor).
 
 %% API
--export([start/2, stop/0]).
+-export([start/2, stop/1]).
 
 %% Supervisor callbacks
 -export([init/1]).
@@ -21,8 +21,11 @@ start(Name, CantReplicas) ->
     NewName = list_to_atom(Name),
     supervisor:start_link({local, NewName}, ?MODULE, {Name, CantReplicas}).
 
-stop() ->
-    supervisor:stop(nosql_db).
+stop(Name) when is_atom(Name) ->
+    supervisor:stop(Name);
+stop(Name) ->
+    NewName = list_to_atom(Name),
+    supervisor:stop(NewName).
 
 %%--------------------------------------------------------------------
 %% Supervisor callbacks
