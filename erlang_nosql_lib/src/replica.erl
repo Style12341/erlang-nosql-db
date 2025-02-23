@@ -4,6 +4,12 @@
 -define(FAKE_PID, make_ref()).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([start/2, stop/1, put/5, del/4, get/3]).
+-type fulfill_order_type() :: {fulfill_order, pid(), reference(), tuple(), tuple()}.
+-type consistency() :: one | quorum | all.
+-type key() :: any().
+-type value() :: any().
+-type ts() :: integer().
+-type replica() :: atom().
 
 %% @doc
 %% Starts the replica server with the given name and list of replicas.
@@ -51,7 +57,7 @@ del(Key, Ts, Consistency, Name) ->
 
 %% @doc
 %% Puts the given value associated with the given key into the replica server.
-%% @spec put(any(), any(), any(), atom(), atom()) -> any()
+-spec put(key(), value(), ts(), consistency(), replica()) -> any().
 put(Key, Value, Ts, Consistency, Name) ->
     gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
     receive
@@ -84,26 +90,24 @@ replica_del(PidCoordinador, Ref, Key, Ts, Replica) ->
         PidCoordinador, Ref, Key, Ts, Replica
     ]),
     gen_server:cast(Replica, {replica_del, Key, Ts, PidCoordinador, Ref}).
+replica_fix(Key, Value, Replica) ->
+    io:format("[replica_fix] Key=~p, Value=~p, Replica=~p~n", [Key, Value, Replica]),
+    gen_server:cast(Replica, {replica_fix, Key, Value}).
 
 %% @doc
 %% Handles the call messages for the gen_server.
 %% @spec handle_call(tuple(), {pid(), any()}, {dict(), list(), dict()}) -> {reply, any(), {dict(), list(), dict()}}
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] put: Key=~p, Value=~p, Ts=~p, Cons=~p~n", [Key, Value, Ts, Cons]),
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, put),
     NewShinyData = new_order(Pid, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-
 handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] del: Key=~p, Ts=~p, Cons=~p~n", [Key, Ts, Cons]),
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, del),
     NewShinyData = new_order(Pid, {Key, Ts}, Data, Cons, ListReplicas, del),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] get: Key=~p, Cons=~p~n", [Key, Cons]),
     % Pid -> {get, ExpectedResponses, Responses, BestValue}
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, get),
@@ -114,30 +118,44 @@ handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
 %% Handles the cast messages for the gen_server.
 %% @spec handle_cast(atom(), any()) -> {stop, normal, ok}
 handle_cast({replica_put, Key, Value, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     {BestValue, NewData} = put_value(Key, Value, Ts, Data),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    SavedValue = get_value(Key, NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
     {noreply, {NewData, ListReplicas, OrderData}};
 handle_cast({replica_del, Key, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_del: Key=~p, Ts=~p~n", [Key, Ts]),
     {BestValue, NewData} = delete_value(Key, Ts, Data),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    SavedValue = get_value(Key, NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
     {noreply, {NewData, ListReplicas, OrderData}};
 handle_cast({replica_get, PidCoordinador, Ref, Key}, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_get: Key=~p CoordinatorPid=~p~n", [Key, PidCoordinador]),
     Value = get_value(Key, Data),
-    PidCoordinador ! {fulfill_order, self(), Ref, Value},
+    PidCoordinador ! {fulfill_order, self(), Ref, Value, Value},
+    {noreply, {Data, ListReplicas, OrderData}};
+handle_cast({replica_fix, Key, {ok, Value, Ts}}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_cast] replica_fix put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
+    {_, NewData} = put_value(Key, Value, Ts, Data),
+    {noreply, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_fix, Key, {ko, Ts}}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_cast] replica_fix delete: Key=~p, Ts=~p~n", [Key, Ts]),
+    {_, NewData} = delete_value(Key, Ts, Data),
+    {noreply, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_fix, _, {not_found}}, {Data, ListReplicas, OrderData}) ->
+    io:format("[handle_cast] replica_fix not_found: not_found~n"),
     {noreply, {Data, ListReplicas, OrderData}};
 handle_cast(stop, _State) ->
     {stop, normal, ok}.
 
 %% @doc
 %% Handles the info messages for the gen_server.
-%% @spec handle_info(tuple(), {dict(), list(), dict()}) -> {noreply, {dict(), list(), dict()}}
-handle_info({fulfill_order, SenderPid, Ref, Value} = Info, {Data, ReplicaList, OrderData} = State) ->
+-spec handle_info(fulfill_order_type(), {dict:dict(), list(), dict:dict()}) ->
+    {noreply, {dict:dict(), list(), dict:dict()}}.
+handle_info(
+    {fulfill_order, SenderPid, Ref, Value, SavedValue} = Info,
+    {Data, ReplicaList, OrderData}
+) ->
     % Print the value
-    io:format("[handle_info] fulfillorder: info: ~p state: ~p pidReceiver: ~p~n", [
-        Info, State, self()
+    io:format("[handle_info] fulfillorder: info: ~p  pidReceiver: ~p~n", [
+        Info, self()
     ]),
     {Op, ExpectedResponses, Responses, BestValue, Key} = dict:fetch(Ref, OrderData),
     io:format(
@@ -146,56 +164,46 @@ handle_info({fulfill_order, SenderPid, Ref, Value} = Info, {Data, ReplicaList, O
         ]
     ),
     NewBestValue = compare_values(Value, BestValue),
-    ensure_sender_consistency(SenderPid, Key, Value, NewBestValue),
+    case NewBestValue of
+        Value -> NewData = Data;
+        _ -> NewData = put_value(Key, SavedValue, Data)
+    end,
+    ensure_sender_consistency(SenderPid, Key, SavedValue, NewData),
     % PidNode ! {reply, NewBestValue},
     NewResponses = Responses + 1,
     case NewResponses of
         ExpectedResponses ->
-            io:format("[handle_info] Answering Value: ~p to PID ~p~n", [ExpectedResponses, Ref]),
             Ref ! {reply, NewBestValue},
-            NewData = ensure_consistency(Op, Key, NewBestValue, Data),
             NewOrderData = dict:erase(Ref, OrderData);
         _ ->
             NewOrderData = dict:store(
                 Ref, {Op, ExpectedResponses, NewResponses, NewBestValue, Key}, OrderData
-            ),
-            NewData = Data
+            )
     end,
     {noreply, {NewData, ReplicaList, NewOrderData}};
-handle_info({fix_get_consistency, Key, Value}, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_info] fix_get_consistency: Key=~p, Value=~p~n", [Key, Value]),
-    NewData = ensure_consistency(get, Key, Value, Data),
-    {noreply, {NewData, ListReplicas, OrderData}};
 handle_info(_Info, State) ->
-    io:format("[handle_info] unknown info: ~p state: ~p pidReceiver: ~p~n", [_Info, State, self()]),
     {noreply, State}.
 
-ensure_sender_consistency(SenderPID, Key, Value, NewBestValue) ->
-    io:format("[ensure_sender_consistency] SenderPID=~p, Key=~p, Value=~p, NewBestValue=~p~n", [
-        SenderPID, Key, Value, NewBestValue
+ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
+    io:format("[ensure_sender_consistency] SenderPid=~p, Key=~p, SavedValue=~p~n", [
+        SenderPid, Key, SavedValue
     ]),
-    case Value of
-        NewBestValue ->
-            {consistent};
+    CurrentValue = get_value(Key, Data),
+    BestValue = compare_values(CurrentValue, SavedValue),
+    case BestValue of
+        CurrentValue ->
+            case CurrentValue of
+                SavedValue -> {consistent};
+                _ -> replica_fix(Key, CurrentValue, SenderPid)
+            end;
         _ ->
-            SenderPID ! {fix_get_consistency, Key, NewBestValue},
-            {inconsistent}
+            SenderPid ! {reply, BestValue}
     end.
 
-ensure_consistency(get, Key, {ok, Val, Ts}, Data) ->
-    put_value(Key, Val, Ts, Data);
-% Best value was deleted at Ts
-ensure_consistency(get, Key, {ko, Ts}, Data) ->
-    delete_value(Key, Ts, Data);
-ensure_consistency(get, _, {not_found}, Data) ->
-    Data;
-ensure_consistency(_, _, _, Data) ->
-    Data.
 %% @doc
 %% Generates a new order for the given reference.
 %% @spec generate_order(reference(), list(), atom(), dict(), atom()) -> dict()
 generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
-    io:format("[generate_order] Ref=~p, Consistency=~p, Op=~p~n", [Ref, Consistency, Op]),
     dict:store(
         Ref,
         {Op, get_expected_responses(length(ListReplicas), Consistency), 0, {not_found}, Key},
@@ -206,7 +214,6 @@ generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
 %% Gets the expected number of responses based on the consistency level.
 %% @spec get_expected_responses(integer(), atom()) -> integer()
 get_expected_responses(Length, Consistency) ->
-    io:format("[get_expected_responses] Length=~p, Consistency=~p~n", [Length, Consistency]),
     case Consistency of
         one -> 1;
         quorum -> (Length) div 2 + 1;
@@ -217,29 +224,29 @@ get_expected_responses(Length, Consistency) ->
 %% Creates a new order based on the consistency level.
 %% @spec new_order(reference(), tuple(), dict(), atom(), list(), atom()) -> dict()
 new_order(Ref, OpData, Data, one, ListReplicas, Op) ->
-    io:format("[new_order] one: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    SavedValue = get_value(element(1, OpData), NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
     propagate_operation(Op, OpData, ListReplicas),
     NewData;
 new_order(Ref, OpData, Data, quorum, ListReplicas, Op) ->
-    io:format("[new_order] quorum: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    SavedValue = get_value(element(1, OpData), NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
     Size = length(ListReplicas) div 2,
     NewList = lists:sublist(ListReplicas, Size),
-    io:format("[new_order] quorum: Size=~p, NewList=~p~n", [Size, NewList]),
+
     PropagateOpList = lists:subtract(ListReplicas, NewList),
     request_order_fullfilment(Ref, PidCoordinador, OpData, NewList, Op),
     propagate_operation(Op, OpData, PropagateOpList),
     NewData;
 new_order(Ref, OpData, Data, all, ListReplicas, Op) ->
-    io:format("[new_order] all: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, self(), Ref, BestValue},
+    SavedValue = get_value(element(1, OpData), NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
     request_order_fullfilment(Ref, PidCoordinador, OpData, ListReplicas, Op),
     NewData.
 
@@ -247,10 +254,8 @@ new_order(Ref, OpData, Data, all, ListReplicas, Op) ->
 %% Requests the fulfillment of an order.
 %% @spec request_order_fullfilment(reference(), pid(), tuple(), list(), atom()) -> ok
 request_order_fullfilment(_, _, _, [], _) ->
-    io:format("[request_order_fullfilment] done~n"),
     ok;
 request_order_fullfilment(Ref, PidCoordinador, OpData, [Replica | Rest], Op) ->
-    io:format("[request_order_fullfilment] Ref=~p, Replica=~p, Op=~p~n", [Ref, Replica, Op]),
     apply_replica_operation(Op, OpData, PidCoordinador, Ref, Replica),
     request_order_fullfilment(Ref, PidCoordinador, OpData, Rest, Op).
 
@@ -258,10 +263,8 @@ request_order_fullfilment(Ref, PidCoordinador, OpData, [Replica | Rest], Op) ->
 %% Propagates the operation to the replicas.
 %% @spec propagate_operation(atom(), tuple(), list()) -> ok
 propagate_operation(_, _, []) ->
-    io:format("[propagate_operation] done~n"),
     ok;
 propagate_operation(Op, OpData, [Replica | Rest]) ->
-    io:format("[propagate_operation] Op=~p, Replica=~p~n", [Op, Replica]),
     % Generate a fake pid for the coordinator
     apply_replica_operation(Op, OpData, ?FAKE_PID, ?FAKE_PID, Replica),
     propagate_operation(Op, OpData, Rest).
@@ -283,21 +286,17 @@ compare_values(BestValue, {not_found}) -> BestValue.
 %% Applies the given operation to the data.
 %% @spec apply_operation(atom(), tuple(), dict()) -> {tuple(), dict()}
 apply_operation(get, {Key}, Data) ->
-    io:format("[apply_operation] get: Key=~p~n", [Key]),
     BestValue = get_value(Key, Data),
     {BestValue, Data};
 apply_operation(put, {Key, Value, Ts}, Data) ->
-    io:format("[apply_operation] put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     put_value(Key, Value, Ts, Data);
 apply_operation(del, {Key, Ts}, Data) ->
-    io:format("[apply_operation] del: Key=~p, Ts=~p~n", [Key, Ts]),
     delete_value(Key, Ts, Data).
 
 %% @doc
 %% Applies the given operation to a replica.
 %% @spec apply_replica_operation(atom(), tuple(), pid(), reference(), atom()) -> any()
 apply_replica_operation(get, {Key}, PidCoordinador, Ref, Replica) ->
-    io:format("[apply_replica_operation] get: Key=~p, Replica=~p~n", [Key, Replica]),
     replica_get(PidCoordinador, Ref, Key, Replica);
 apply_replica_operation(put, {Key, Value, Ts}, PidCoordinador, Ref, Replica) ->
     io:format("[apply_replica_operation] put: Key=~p, Value=~p, Ts=~p, Replica=~p~n", [
@@ -305,14 +304,12 @@ apply_replica_operation(put, {Key, Value, Ts}, PidCoordinador, Ref, Replica) ->
     ]),
     replica_put(PidCoordinador, Ref, Key, Value, Ts, Replica);
 apply_replica_operation(del, {Key, Ts}, PidCoordinador, Ref, Replica) ->
-    io:format("[apply_replica_operation] del: Key=~p, Ts=~p, Replica=~p~n", [Key, Ts, Replica]),
     replica_del(PidCoordinador, Ref, Key, Ts, Replica).
 
 %% @doc
 %% Gets the value associated with the given key from the data.
 %% @spec get_value(any(), dict()) -> tuple()
 get_value(Key, Data) ->
-    io:format("[get_value] Key=~p~n", [Key]),
     case dict:find(Key, Data) of
         {ok, {?DELETE_VALUE, Ts}} -> {ko, Ts};
         {ok, {Val, Ts}} -> {ok, Val, Ts};
@@ -323,7 +320,6 @@ get_value(Key, Data) ->
 %% Deletes the value associated with the given key from the data.
 %% @spec delete_value(any(), any(), dict()) -> {tuple(), dict()}
 delete_value(Key, Ts, Data) ->
-    io:format("[delete_value] Key=~p, Ts=~p~n", [Key, Ts]),
     case get_value(Key, Data) of
         {ko, OldTs} when OldTs > Ts -> {{not_found}, Data};
         {ko, _} -> {{not_found}, dict:store(Key, {?DELETE_VALUE, Ts}, Data)};
@@ -331,14 +327,18 @@ delete_value(Key, Ts, Data) ->
         {ok, _, _} -> {{ok, Ts, Ts}, dict:store(Key, {?DELETE_VALUE, Ts}, Data)};
         {not_found} -> {{not_found}, Data}
     end.
-
 %% @doc
 %% Puts the given value associated with the given key into the data.
 %% @spec put_value(any(), any(), any(), dict()) -> {tuple(), dict()}
 put_value(Key, Value, Ts, Data) ->
-    io:format("[put_value] Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     case get_value(Key, Data) of
         {ok, _, OldTs} when OldTs > Ts -> {{ko, OldTs}, Data};
         {ko, OldTs} when OldTs > Ts -> {{not_found}, Data};
         _ -> {{ok, Value, Ts}, dict:store(Key, {Value, Ts}, Data)}
     end.
+put_value(Key, {ok, Value, Ts}, Data) ->
+    put_value(Key, Value, Ts, Data);
+put_value(Key, {ko, Ts}, Data) ->
+    put_value(Key, ?DELETE_VALUE, Ts, Data);
+put_value(_, {not_found}, Data) ->
+    Data.
