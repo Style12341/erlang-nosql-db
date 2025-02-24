@@ -2,8 +2,25 @@
 -behaviour(gen_server).
 -define(DELETE_VALUE, n2FlOTg0OWYtY2E4Zi00NjBhLTljNjgtYjQzNzQ1ZjYyZjAw).
 -define(FAKE_PID, make_ref()).
+
+%% Define a record for the order -- 5 fields as expected.
+-record(order, {
+    op :: operation(),
+    expected_responses :: response_qty(),
+    responses :: response_qty(),
+    best_value :: operation_value(),
+    key :: key()
+}).
+
+%%%-------------------------------------------------------------------
+%%% Exported functions
+%%%-------------------------------------------------------------------
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([start/2, stop/1, put/5, del/4, get/3]).
+
+%%%-------------------------------------------------------------------
+%%% Types
+%%%-------------------------------------------------------------------
 -type consistency() :: one | quorum | all.
 -type put_reply() :: {ok} | {ko} | {not_found}.
 -type get_reply() :: {ok, value(), timestamp()} | {ko, timestamp()} | {not_found}.
@@ -19,29 +36,24 @@
 -type operation_value() :: get_reply().
 -type operation_data() :: {key()} | {key(), value(), timestamp()} | {key(), timestamp()}.
 -type response_qty() :: integer().
--type dict_order() :: dict:dict(order_ref(), {
-    operation(), response_qty(), response_qty(), operation_value(), key()
-}).
+
+%% Instead of tuple orders, we use our record.
+-type dict_order() :: dict:dict(order_ref(), #order{}).
+
+-type state() :: {dict_data(), list(replica()), dict_order()}.
 
 %% @doc """
 %% Starts the replica server with the given name and list of replicas.
 %% """
--spec start(replica(), list(replica())) -> {ok, pid()} | {error, any()}.
+-spec start(replica(), list(replica())) -> {ok, pid()} | {error, state()}.
 start(Name, ListReplicas) ->
-    % Estado Inicial {Datos, Lista de replicas, Datos de pedidos}
-    % Datos de pedidos es un diccionario con un numero de PID de cliente como clave y una lista de tuplas {Operacion, ExpectedResponses, Responses, BestValue} como valor
+    %% Estado Inicial: {Data, ListReplicas, OrderData}
     gen_server:start_link({local, Name}, ?MODULE, {dict:new(), ListReplicas, dict:new()}, []).
 
-%% @doc """
-%% Initializes the server state.
-%% """
--spec init(any()) -> {ok, any()}.
+-spec init(any()) -> {ok, state()}.
 init(Args) ->
     {ok, Args}.
 
-%% @doc """
-%% Terminates the server.
-%% """
 -spec terminate(any(), any()) -> ok.
 terminate(_Reason, _Data) ->
     ok.
@@ -83,9 +95,9 @@ put(Key, Value, Ts, Consistency, Name) ->
         {reply, Answer} -> Answer
     end.
 
-%% @doc """
-%% Handles the get request from a replica.
-%% """
+%%%-------------------------------------------------------------------
+%%% Replica Functions
+%%%-------------------------------------------------------------------
 -spec replica_get(pid_ref(), order_ref(), key(), replica()) -> ok.
 replica_get(PidCoordinador, Ref, Key, Replica) ->
     gen_server:cast(Replica, {replica_get, PidCoordinador, Ref, Key}).
@@ -112,9 +124,10 @@ replica_del(PidCoordinador, Ref, Key, Ts, Replica) ->
 replica_fix(Key, Value, Replica) ->
     gen_server:cast(Replica, {replica_fix, Key, Value}).
 
-%% @doc """
-%% Handles the call messages for the gen_server.
-%% """
+%%%-------------------------------------------------------------------
+%%% Gen_server callbacks
+%%%-------------------------------------------------------------------
+-spec handle_call(any(), {pid(), any()}, state()) -> {reply, any(), state()}.
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, put),
@@ -134,6 +147,7 @@ handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
 %% @doc """
 %% Handles the cast messages for the gen_server.
 %% """
+-spec handle_cast(any(), state()) -> {noreply, state()}.
 handle_cast({replica_put, Key, Value, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
     {BestValue, NewData} = put_value(Key, Value, Ts, Data),
     SavedValue = get_value(Key, NewData),
@@ -162,25 +176,40 @@ handle_cast(stop, _State) ->
 %% @doc """
 %% Handles the info messages for the gen_server.
 %% """
+-spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaList, OrderData}) ->
     case dict:find(Ref, OrderData) of
-        {ok, {Op, ExpectedResponses, Responses, BestValue, Key}} ->
+        {ok,
+            Order = #order{
+                op = Op,
+                expected_responses = ExpectedResponses,
+                responses = Responses,
+                best_value = BestValue,
+                key = Key
+            }} ->
             NewBestValue = compare_values(Value, BestValue),
-            case NewBestValue of
-                Value -> NewData = Data;
-                _ -> {_, NewData} = put_value(Key, SavedValue, Data)
-            end,
+            NewData =
+                case NewBestValue of
+                    Value ->
+                        Data;
+                    _ ->
+                        {_, ND} = put_value(Key, SavedValue, Data),
+                        ND
+                end,
             ensure_sender_consistency(SenderPid, Key, SavedValue, NewData),
             NewResponses = Responses + 1,
-            case NewResponses of
-                ExpectedResponses ->
-                    Ref ! {reply, format_client_response(Op, NewBestValue)},
-                    NewOrderData = dict:erase(Ref, OrderData);
-                _ ->
-                    NewOrderData = dict:store(
-                        Ref, {Op, ExpectedResponses, NewResponses, NewBestValue, Key}, OrderData
-                    )
-            end,
+            NewOrderData =
+                case NewResponses of
+                    ExpectedResponses ->
+                        Ref ! {reply, format_client_response(Op, NewBestValue)},
+                        dict:erase(Ref, OrderData);
+                    _ ->
+                        OrderNew = Order#order{
+                            responses = NewResponses,
+                            best_value = NewBestValue
+                        },
+                        dict:store(Ref, OrderNew, OrderData)
+                end,
             {noreply, {NewData, ReplicaList, NewOrderData}};
         _ ->
             {noreply, {Data, ReplicaList, OrderData}}
@@ -216,12 +245,14 @@ ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
     key(), order_ref(), list(replica()), consistency(), dict_order(), operation()
 ) -> dict_order().
 generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
-    dict:store(
-        Ref,
-        {Op, get_expected_responses(length(ListReplicas), Consistency), 0, {not_found}, Key},
-        OrderData
-    ).
-
+    Order = #order{
+        op = Op,
+        expected_responses = get_expected_responses(length(ListReplicas), Consistency),
+        responses = 0,
+        best_value = {not_found},
+        key = Key
+    },
+    dict:store(Ref, Order, OrderData).
 %% @doc """
 %% Gets the expected number of responses based on the consistency level.
 %% """
