@@ -23,7 +23,7 @@ start(Name, CantReplicas) when is_atom(Name) ->
 start(Name, CantReplicas) ->
     NewName = list_to_atom(Name),
     supervisor:start_link({local, NewName}, ?MODULE, {Name, CantReplicas}).
--spec stop(atom()) -> ok.
+-spec stop(atom()) -> true.
 stop(Name) when is_atom(Name) ->
     exit(whereis(Name), shutdown);
 stop(Name) ->

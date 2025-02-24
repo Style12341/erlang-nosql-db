@@ -188,28 +188,11 @@ handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaLi
                 key = Key
             }} ->
             NewBestValue = compare_values(Value, BestValue),
-            NewData =
-                case NewBestValue of
-                    Value ->
-                        Data;
-                    _ ->
-                        {_, ND} = put_value(Key, SavedValue, Data),
-                        ND
-                end,
+            NewData = update_coordinator(Key, NewBestValue, Value, SavedValue, Data),
             ensure_sender_consistency(SenderPid, Key, SavedValue, NewData),
-            NewResponses = Responses + 1,
-            NewOrderData =
-                case NewResponses of
-                    ExpectedResponses ->
-                        Ref ! {reply, format_client_response(Op, NewBestValue)},
-                        dict:erase(Ref, OrderData);
-                    _ ->
-                        OrderNew = Order#order{
-                            responses = NewResponses,
-                            best_value = NewBestValue
-                        },
-                        dict:store(Ref, OrderNew, OrderData)
-                end,
+            NewOrderData = increment_order_data_responses(
+                ExpectedResponses, Responses, Op, Ref, NewBestValue, Order, OrderData
+            ),
             {noreply, {NewData, ReplicaList, NewOrderData}};
         _ ->
             {noreply, {Data, ReplicaList, OrderData}}
@@ -217,6 +200,43 @@ handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaLi
 handle_info(_Info, State) ->
     {noreply, State}.
 
+-spec update_coordinator(key(), operation_value(), operation_value(), get_reply(), dict_data()) ->
+    dict_data().
+%% @doc """
+%% Updates the coordinator with the new value received from a replica if necessary.
+%% """
+update_coordinator(_, Value, Value, _, Data) ->
+    Data;
+update_coordinator(Key, _, _, ValueToSave, Data) ->
+    {_, ND} = put_value(Key, ValueToSave, Data),
+    ND.
+%% @doc """
+%% Increments the number of responses for the given order. Ends the order if all responses are received.
+%% """
+-spec increment_order_data_responses(
+    response_qty(),
+    response_qty(),
+    operation(),
+    order_ref(),
+    operation_value(),
+    #order{},
+    dict_order()
+) -> dict_order().
+increment_order_data_responses(
+    ExpectedResponses, Responses, Op, Ref, NewBestValue, Order, OrderData
+) ->
+    NewResponses = Responses + 1,
+    case NewResponses of
+        ExpectedResponses ->
+            Ref ! {reply, format_client_response(Op, NewBestValue)},
+            dict:erase(Ref, OrderData);
+        _ ->
+            OrderNew = Order#order{
+                responses = NewResponses,
+                best_value = NewBestValue
+            },
+            dict:store(Ref, OrderNew, OrderData)
+    end.
 %% @doc """
 %% Ensures consistency for the sender.
 %% """
