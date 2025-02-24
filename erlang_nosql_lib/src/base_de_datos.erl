@@ -14,6 +14,8 @@
 %%--------------------------------------------------------------------
 %% API functions
 %%--------------------------------------------------------------------
+-spec start(atom(), non_neg_integer()) -> {ok, pid()} | {error, term()}.
+start(_,NegInt) when NegInt < 0 -> {error, "CantReplicas must be a non-negative integer"};
 start(Name, CantReplicas) when is_atom(Name) ->
     %% Register the supervisor as 'nosql_db'
     NewName = atom_to_list(Name),
@@ -21,7 +23,7 @@ start(Name, CantReplicas) when is_atom(Name) ->
 start(Name, CantReplicas) ->
     NewName = list_to_atom(Name),
     supervisor:start_link({local, NewName}, ?MODULE, {Name, CantReplicas}).
-
+-spec stop(atom()) -> ok.
 stop(Name) when is_atom(Name) ->
     exit(whereis(Name), shutdown);
 stop(Name) ->
