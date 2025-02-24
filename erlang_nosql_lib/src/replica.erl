@@ -4,89 +4,117 @@
 -define(FAKE_PID, make_ref()).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([start/2, stop/1, put/5, del/4, get/3]).
--type fulfill_order_type() :: {fulfill_order, pid(), reference(), tuple(), tuple()}.
 -type consistency() :: one | quorum | all.
--type key() :: any().
--type value() :: any().
--type ts() :: integer().
+-type put_reply() :: {ok} | {ko} | {not_found}.
+-type get_reply() :: {ok, value(), timestamp()} | {ko, timestamp()} | {not_found}.
+-type del_reply() :: {ok} | {ko} | {not_found}.
+-type timestamp() :: integer().
 -type replica() :: atom().
+-type key() :: term().
+-type value() :: term().
+-type operation() :: get | put | del.
+-type order_ref() :: pid() | reference().
+-type pid_ref() :: pid() | reference().
+-type dict_data() :: dict:dict(key(), {value(), timestamp()}).
+-type operation_value() :: get_reply().
+-type operation_data() :: {key()} | {key(), value(), timestamp()} | {key(), timestamp()}.
+-type response_qty() :: integer().
+-type dict_order() :: dict:dict(order_ref(), {
+    operation(), response_qty(), response_qty(), operation_value(), key()
+}).
 
-%% @doc
+%% @doc """
 %% Starts the replica server with the given name and list of replicas.
-%% @spec start(atom(), list()) -> {ok, pid()} | {error, any()}
+%% """
+-spec start(replica(), list(replica())) -> {ok, pid()} | {error, any()}.
 start(Name, ListReplicas) ->
     % Estado Inicial {Datos, Lista de replicas, Datos de pedidos}
     % Datos de pedidos es un diccionario con un numero de PID de cliente como clave y una lista de tuplas {Operacion, ExpectedResponses, Responses, BestValue} como valor
     gen_server:start_link({local, Name}, ?MODULE, {dict:new(), ListReplicas, dict:new()}, []).
 
-%% @doc
+%% @doc """
 %% Initializes the server state.
-%% @spec init(any()) -> {ok, any()}
+%% """
+-spec init(any()) -> {ok, any()}.
 init(Args) ->
     {ok, Args}.
 
-%% @doc
+%% @doc """
 %% Terminates the server.
-%% @spec terminate(any(), any()) -> ok
+%% """
+-spec terminate(any(), any()) -> ok.
 terminate(_Reason, _Data) ->
     ok.
 
-%% @doc
+%% @doc """
 %% Stops the replica server with the given name.
-%% @spec stop(atom()) -> ok
+%% """
+-spec stop(replica()) -> ok.
 stop(Name) ->
     gen_server:cast(Name, stop).
 
-%% @doc
+%% @doc """
 %% Gets the value associated with the given key from the replica server.
-%% @spec get(any(), atom(), atom()) -> any()
+%% """
+-spec get(key(), consistency(), replica()) -> get_reply().
 get(Key, Consistency, Name) ->
     gen_server:call(Name, {get, Key, Consistency}),
     receive
         {reply, Answer} -> Answer
     end.
 
-%% @doc
+%% @doc """
 %% Deletes the value associated with the given key from the replica server.
-%% @spec del(any(), any(), atom(), atom()) -> any()
+%% """
+-spec del(key(), timestamp(), consistency(), replica()) -> del_reply().
 del(Key, Ts, Consistency, Name) ->
     gen_server:call(Name, {del, Key, Ts, Consistency}),
     receive
         {reply, Answer} -> Answer
     end.
 
-%% @doc
+%% @doc """
 %% Puts the given value associated with the given key into the replica server.
--spec put(key(), value(), ts(), consistency(), replica()) -> any().
+%% """
+-spec put(key(), value(), timestamp(), consistency(), replica()) -> put_reply().
 put(Key, Value, Ts, Consistency, Name) ->
     gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
     receive
         {reply, Answer} -> Answer
     end.
 
-%% @doc
+%% @doc """
 %% Handles the get request from a replica.
-%% @spec replica_get(pid(), reference(), any(), atom()) -> any()
+%% """
+-spec replica_get(pid_ref(), order_ref(), key(), replica()) -> ok.
 replica_get(PidCoordinador, Ref, Key, Replica) ->
     gen_server:cast(Replica, {replica_get, PidCoordinador, Ref, Key}).
 
-%% @doc
+%% @doc """
 %% Handles the put request from a replica.
-%% @spec replica_put(pid(), reference(), any(), any(), any(), atom()) -> any()
+%% """
+-spec replica_put(pid_ref(), order_ref(), key(), value(), timestamp(), replica()) -> ok.
 replica_put(PidCoordinador, Ref, Key, Value, Ts, Replica) ->
     gen_server:cast(Replica, {replica_put, Key, Value, Ts, PidCoordinador, Ref}).
 
-%% @doc
+%% @doc """
 %% Handles the delete request from a replica.
-%% @spec replica_del(pid(), reference(), any(), any(), atom()) -> any()
+%% """
+-spec replica_del(pid_ref(), order_ref(), key(), timestamp(), replica()) -> ok.
 replica_del(PidCoordinador, Ref, Key, Ts, Replica) ->
     gen_server:cast(Replica, {replica_del, Key, Ts, PidCoordinador, Ref}).
+
+%% @doc """
+%% Fixes the replica for a given key.
+%% """
+-spec replica_fix(key(), get_reply(), replica()) ->
+    ok.
 replica_fix(Key, Value, Replica) ->
     gen_server:cast(Replica, {replica_fix, Key, Value}).
 
-%% @doc
+%% @doc """
 %% Handles the call messages for the gen_server.
-%% @spec handle_call(tuple(), {pid(), any()}, {dict(), list(), dict()}) -> {reply, any(), {dict(), list(), dict()}}
+%% """
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, put),
@@ -98,15 +126,14 @@ handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     NewShinyData = new_order(Pid, {Key, Ts}, Data, Cons, ListReplicas, del),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    % Pid -> {get, ExpectedResponses, Responses, BestValue}
     {Pid, _} = From,
     NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, get),
     NewShinyData = new_order(Pid, {Key}, Data, Cons, ListReplicas, get),
     {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}}.
 
-%% @doc
+%% @doc """
 %% Handles the cast messages for the gen_server.
-%% @spec handle_cast(atom(), any()) -> {stop, normal, ok}
+%% """
 handle_cast({replica_put, Key, Value, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
     {BestValue, NewData} = put_value(Key, Value, Ts, Data),
     SavedValue = get_value(Key, NewData),
@@ -132,15 +159,10 @@ handle_cast({replica_fix, _, {not_found}}, {Data, ListReplicas, OrderData}) ->
 handle_cast(stop, _State) ->
     {stop, normal, ok}.
 
-%% @doc
+%% @doc """
 %% Handles the info messages for the gen_server.
--spec handle_info(fulfill_order_type(), {dict:dict(), list(), dict:dict()}) ->
-    {noreply, {dict:dict(), list(), dict:dict()}}.
-handle_info(
-    {fulfill_order, SenderPid, Ref, Value, SavedValue},
-    {Data, ReplicaList, OrderData}
-) ->
-    % Print the value
+%% """
+handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaList, OrderData}) ->
     case dict:find(Ref, OrderData) of
         {ok, {Op, ExpectedResponses, Responses, BestValue, Key}} ->
             NewBestValue = compare_values(Value, BestValue),
@@ -149,7 +171,6 @@ handle_info(
                 _ -> {_, NewData} = put_value(Key, SavedValue, Data)
             end,
             ensure_sender_consistency(SenderPid, Key, SavedValue, NewData),
-            % PidNode ! {reply, NewBestValue},
             NewResponses = Responses + 1,
             case NewResponses of
                 ExpectedResponses ->
@@ -167,6 +188,10 @@ handle_info(
 handle_info(_Info, State) ->
     {noreply, State}.
 
+%% @doc """
+%% Ensures consistency for the sender.
+%% """
+-spec ensure_sender_consistency(pid(), key(), get_reply(), dict_data()) -> get_reply().
 ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
     CurrentValue = get_value(Key, Data),
     BestValue = compare_values(CurrentValue, SavedValue),
@@ -184,9 +209,12 @@ ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
             BestValue
     end.
 
-%% @doc
+%% @doc """
 %% Generates a new order for the given reference.
-%% @spec generate_order(reference(), list(), atom(), dict(), atom()) -> dict()
+%% """
+-spec generate_order(
+    key(), order_ref(), list(replica()), consistency(), dict_order(), operation()
+) -> dict_order().
 generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
     dict:store(
         Ref,
@@ -194,9 +222,10 @@ generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
         OrderData
     ).
 
-%% @doc
+%% @doc """
 %% Gets the expected number of responses based on the consistency level.
-%% @spec get_expected_responses(integer(), atom()) -> integer()
+%% """
+-spec get_expected_responses(integer(), consistency()) -> response_qty().
 get_expected_responses(Length, Consistency) ->
     case Consistency of
         one -> 1;
@@ -204,9 +233,13 @@ get_expected_responses(Length, Consistency) ->
         all -> Length + 1
     end.
 
-%% @doc
+%% @doc """
 %% Creates a new order based on the consistency level.
-%% @spec new_order(reference(), tuple(), dict(), atom(), list(), atom()) -> dict()
+%% """
+-spec new_order(
+    order_ref(), operation_data(), dict_data(), consistency(), list(replica()), operation()
+) ->
+    dict_data().
 new_order(Ref, OpData, Data, one, ListReplicas, Op) ->
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
@@ -222,28 +255,31 @@ new_order(Ref, OpData, Data, _, ListReplicas, Op) ->
     request_order_fullfilment(Ref, PidCoordinador, OpData, ListReplicas, Op),
     NewData.
 
-%% @doc
+%% @doc """
 %% Requests the fulfillment of an order.
-%% @spec request_order_fullfilment(reference(), pid(), tuple(), list(), atom()) -> ok
+%% """
+-spec request_order_fullfilment(order_ref(), pid(), operation_data(), list(replica()), operation()) ->
+    ok.
 request_order_fullfilment(_, _, _, [], _) ->
     ok;
 request_order_fullfilment(Ref, PidCoordinador, OpData, [Replica | Rest], Op) ->
     apply_replica_operation(Op, OpData, PidCoordinador, Ref, Replica),
     request_order_fullfilment(Ref, PidCoordinador, OpData, Rest, Op).
 
-%% @doc
+%% @doc """
 %% Propagates the operation to the replicas.
-%% @spec propagate_operation(atom(), tuple(), list()) -> ok
+%% """
+-spec propagate_operation(operation(), operation_data(), list(replica())) -> ok.
 propagate_operation(_, _, []) ->
     ok;
 propagate_operation(Op, OpData, [Replica | Rest]) ->
-    % Generate a fake pid for the coordinator
     apply_replica_operation(Op, OpData, ?FAKE_PID, ?FAKE_PID, Replica),
     propagate_operation(Op, OpData, Rest).
 
-%% @doc
+%% @doc """
 %% Compares two values and returns the best one.
-%% @spec compare_values(tuple(), tuple()) -> tuple()
+%% """
+-spec compare_values(operation_value(), operation_value()) -> operation_value().
 compare_values({ok, _, BestTs} = BestValue, {ko, Ts}) when BestTs > Ts -> BestValue;
 compare_values({ok, _, _}, {ko, _} = BestValue) -> BestValue;
 compare_values({ok, _, BestTs} = BestValue, {ok, _, Ts}) when BestTs > Ts -> BestValue;
@@ -254,9 +290,11 @@ compare_values({ko, _}, {ko, BestTs}) -> {ko, BestTs};
 compare_values({not_found}, BestValue) -> BestValue;
 compare_values(BestValue, {not_found}) -> BestValue.
 
-%% @doc
-%% Applies the given operation to the data.
-%% @spec apply_operation(atom(), tuple(), dict()) -> {tuple(), dict()}
+%% @doc """
+%% Applies the given operation to the data. Returns the best value and the new data.
+%% """
+-spec apply_operation(operation(), operation_data(), dict_data()) ->
+    {operation_value(), dict_data()}.
 apply_operation(get, {Key}, Data) ->
     BestValue = get_value(Key, Data),
     {BestValue, Data};
@@ -265,9 +303,11 @@ apply_operation(put, {Key, Value, Ts}, Data) ->
 apply_operation(del, {Key, Ts}, Data) ->
     delete_value(Key, Ts, Data).
 
-%% @doc
-%% Applies the given operation to a replica.
-%% @spec apply_replica_operation(atom(), tuple(), pid(), reference(), atom()) -> any()
+%% @doc """
+%% Applies the given operation to a replica, passing the order ref to fulfill.
+%% """
+-spec apply_replica_operation(operation(), operation_data(), pid_ref(), order_ref(), replica()) ->
+    ok.
 apply_replica_operation(get, {Key}, PidCoordinador, Ref, Replica) ->
     replica_get(PidCoordinador, Ref, Key, Replica);
 apply_replica_operation(put, {Key, Value, Ts}, PidCoordinador, Ref, Replica) ->
@@ -275,9 +315,10 @@ apply_replica_operation(put, {Key, Value, Ts}, PidCoordinador, Ref, Replica) ->
 apply_replica_operation(del, {Key, Ts}, PidCoordinador, Ref, Replica) ->
     replica_del(PidCoordinador, Ref, Key, Ts, Replica).
 
-%% @doc
+%% @doc """
 %% Gets the value associated with the given key from the data.
-%% @spec get_value(any(), dict()) -> tuple()
+%% """
+-spec get_value(key(), dict_data()) -> get_reply().
 get_value(Key, Data) ->
     case dict:find(Key, Data) of
         {ok, {?DELETE_VALUE, Ts}} -> {ko, Ts};
@@ -285,9 +326,10 @@ get_value(Key, Data) ->
         _ -> {not_found}
     end.
 
-%% @doc
+%% @doc """
 %% Deletes the value associated with the given key from the data.
-%% @spec delete_value(any(), any(), dict()) -> {tuple(), dict()}
+%% """
+-spec delete_value(key(), timestamp(), dict_data()) -> {operation_value(), dict_data()}.
 delete_value(Key, Ts, Data) ->
     case get_value(Key, Data) of
         {ko, NewTs} when NewTs > Ts -> {{not_found}, Data};
@@ -296,9 +338,11 @@ delete_value(Key, Ts, Data) ->
         {ok, _, _} -> {{ok, Ts, Ts}, dict:store(Key, {?DELETE_VALUE, Ts}, Data)};
         {not_found} -> {{not_found}, Data}
     end.
-%% @doc
+
+%% @doc """
 %% Puts the given value associated with the given key into the data.
-%% @spec put_value(any(), any(), any(), dict()) -> {tuple(), dict()}
+%% """
+-spec put_value(key(), value(), timestamp(), dict_data()) -> {operation_value(), dict_data()}.
 put_value(Key, Value, Ts, Data) ->
     case get_value(Key, Data) of
         {ok, _, NewTs} when NewTs > Ts -> {{ko, NewTs}, Data};
@@ -312,6 +356,11 @@ put_value(Key, {ko, Ts}, Data) ->
 put_value(_, {not_found}, Data) ->
     {not_found, Data}.
 
+%% @doc """
+%% Formats the client response based on the operation and result.
+%% """
+-spec format_client_response(operation(), operation_value()) ->
+    get_reply() | put_reply() | del_reply().
 format_client_response(get, Value) ->
     Value;
 format_client_response(_, {ok, _, _}) ->
