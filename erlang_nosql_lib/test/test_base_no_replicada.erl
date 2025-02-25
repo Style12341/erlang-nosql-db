@@ -9,6 +9,7 @@ start_test() ->
 stop_test() ->
     {ok, Pid} = base_no_replicada:start(),
     base_no_replicada:stop(),
+    timer:sleep(1),
     ?assert(not is_process_alive(Pid)).
 
 put_get_test() ->

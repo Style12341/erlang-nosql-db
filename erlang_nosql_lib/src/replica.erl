@@ -3,19 +3,26 @@
 -define(DELETE_VALUE, n2FlOTg0OWYtY2E4Zi00NjBhLTljNjgtYjQzNzQ1ZjYyZjAw).
 -define(FAKE_PID, make_ref()).
 -define(TIMEOUT_VALUE, 1000).
+-define(ORDER_TIMEOUT, 100).
+-define(TIMEOUT_RETRY_OP_VALUE, 5).
 %% Define a record for the order -- 5 fields as expected.
 -record(order, {
     op :: operation(),
+    op_data :: operation_data(),
     expected_responses :: response_qty(),
     responses :: response_qty(),
     best_value :: operation_value(),
-    key :: key()
+    key :: key(),
+    pending_replicas :: list(replica()),
+    timeoutTimer :: timer:tref()
 }).
 
 %%%-------------------------------------------------------------------
 %%% Exported functions
 %%%-------------------------------------------------------------------
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([
+    init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, request_order_fullfilment/5
+]).
 -export([start/2, stop/1, put/5, del/4, get/3]).
 
 %%%-------------------------------------------------------------------
@@ -70,10 +77,23 @@ stop(Name) ->
 %% """
 -spec get(key(), consistency(), replica()) -> get_reply().
 get(Key, Consistency, Name) ->
-    TimeStamp = gen_server:call(Name, {get, Key, Consistency}),
-    receive
-        {reply, TimeStamp, Answer} -> Answer
-    after ?TIMEOUT_VALUE -> {timeout}
+    get(Key, Consistency, Name, true).
+get(Key, Consistency, Name, Retry) ->
+    try
+        TimeStamp = gen_server:call(Name, {get, Key, Consistency}),
+        receive
+            {reply, TimeStamp, Answer} -> Answer
+        after ?TIMEOUT_VALUE -> {timeout}
+        end
+    catch
+        exit:{_, _} ->
+            case Retry of
+                true ->
+                    timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
+                    get(Key, Consistency, Name, false);
+                false ->
+                    {error, {name_not_found}}
+            end
     end.
 
 %% @doc """
@@ -81,10 +101,23 @@ get(Key, Consistency, Name) ->
 %% """
 -spec del(key(), timestamp(), consistency(), replica()) -> del_reply().
 del(Key, Ts, Consistency, Name) ->
-    TimeStamp = gen_server:call(Name, {del, Key, Ts, Consistency}),
-    receive
-        {reply, TimeStamp, Answer} -> Answer
-    after ?TIMEOUT_VALUE -> {timeout}
+    del(Key, Ts, Consistency, Name, true).
+del(Key, Ts, Consistency, Name, Retry) ->
+    try
+        TimeStamp = gen_server:call(Name, {del, Key, Ts, Consistency}),
+        receive
+            {reply, TimeStamp, Answer} -> Answer
+        after ?TIMEOUT_VALUE -> {timeout}
+        end
+    catch
+        exit:{_, _} ->
+            case Retry of
+                true ->
+                    timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
+                    del(Key, Ts, Consistency, Name, Retry);
+                false ->
+                    {error, {name_not_found}}
+            end
     end.
 
 %% @doc """
@@ -92,10 +125,23 @@ del(Key, Ts, Consistency, Name) ->
 %% """
 -spec put(key(), value(), timestamp(), consistency(), replica()) -> put_reply().
 put(Key, Value, Ts, Consistency, Name) ->
-    TimeStamp = gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
-    receive
-        {reply, TimeStamp, Answer} -> Answer
-    after ?TIMEOUT_VALUE -> {timeout}
+    put(Key, Value, Ts, Consistency, Name, true).
+put(Key, Value, Ts, Consistency, Name, Retry) ->
+    try
+        TimeStamp = gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
+        receive
+            {reply, TimeStamp, Answer} -> Answer
+        after ?TIMEOUT_VALUE -> {timeout}
+        end
+    catch
+        exit:{_, _} ->
+            case Retry of
+                true ->
+                    timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
+                    put(Key, Value, Ts, Consistency, Name, false);
+                false ->
+                    {error, {name_not_found}}
+            end
     end.
 
 %%%-------------------------------------------------------------------
@@ -134,20 +180,23 @@ replica_fix(Key, Value, Replica) ->
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
     Ref = generate_order_ref(Pid),
-    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, put),
-    NewShinyData = new_order(Ref, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
+    OpData = {Key, Value, Ts},
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, put, OpData),
+    NewShinyData = new_order(Ref, OpData, Data, Cons, ListReplicas, put),
     {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
     Ref = generate_order_ref(Pid),
-    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, del),
-    NewShinyData = new_order(Ref, {Key, Ts}, Data, Cons, ListReplicas, del),
+    OpData = {Key, Ts},
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, del, OpData),
+    NewShinyData = new_order(Ref, OpData, Data, Cons, ListReplicas, del),
     {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
     Ref = generate_order_ref(Pid),
-    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, get),
-    NewShinyData = new_order(Ref, {Key}, Data, Cons, ListReplicas, get),
+    OpData = {Key},
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, get, OpData),
+    NewShinyData = new_order(Ref, OpData, Data, Cons, ListReplicas, get),
     {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}}.
 
 -spec generate_order_ref(pid_ref()) -> order_ref().
@@ -196,13 +245,19 @@ handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaLi
                 expected_responses = ExpectedResponses,
                 responses = Responses,
                 best_value = BestValue,
-                key = Key
+                key = Key,
+                pending_replicas = PendingReplicas,
+                timeoutTimer = TimeoutTimer,
+                op_data = OpData
             }} ->
+            NewOrder = reset_timeout_timer(
+                TimeoutTimer, SenderPid, Ref, PendingReplicas, Op, OpData, Order
+            ),
             NewBestValue = compare_values(Value, BestValue),
             NewData = update_coordinator(Key, NewBestValue, Value, SavedValue, Data),
             ensure_sender_consistency(SenderPid, Key, SavedValue, NewData),
             NewOrderData = increment_order_data_responses(
-                ExpectedResponses, Responses, Op, Ref, NewBestValue, Order, OrderData
+                ExpectedResponses, Responses, Op, Ref, NewBestValue, NewOrder, OrderData
             ),
             {noreply, {NewData, ReplicaList, NewOrderData}};
         _ ->
@@ -210,6 +265,28 @@ handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaLi
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
+
+-spec reset_timeout_timer(
+    timer:tref(),
+    pid_ref(),
+    order_ref(),
+    list(replica()),
+    operation(),
+    operation_data(),
+    #order{}
+) ->
+    #order{}.
+reset_timeout_timer(TimeoutTimer, SenderPid, Ref, PendingReplicas, Op, OpData, OrderData) ->
+    {_, SenderName} = process_info(SenderPid, registered_name),
+    NewReplicaList = lists:delete(SenderName, PendingReplicas),
+    timer:cancel(TimeoutTimer),
+    NewTimer = element(
+        2,
+        timer:apply_after(?ORDER_TIMEOUT, replica, request_order_fullfilment, [
+            Ref, self(), OpData, PendingReplicas, Op
+        ])
+    ),
+    OrderData#order{pending_replicas = NewReplicaList, timeoutTimer = NewTimer}.
 
 -spec update_coordinator(key(), operation_value(), operation_value(), get_reply(), dict_data()) ->
     dict_data().
@@ -236,11 +313,9 @@ update_coordinator(Key, _, _, ValueToSave, Data) ->
 increment_order_data_responses(
     ExpectedResponses, Responses, Op, Ref, NewBestValue, Order, OrderData
 ) ->
-    io:format("Incrementing order data responses~n"),
     NewResponses = Responses + 1,
     case NewResponses of
         ExpectedResponses ->
-            io:format("All responses received~n"),
             {Pid, Ts} = Ref,
             Pid ! {reply, Ts, format_client_response(Op, NewBestValue)},
             dict:erase(Ref, OrderData);
@@ -258,13 +333,14 @@ increment_order_data_responses(
 ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
     CurrentValue = get_value(Key, Data),
     BestValue = compare_values(CurrentValue, SavedValue),
+    {_, SenderName} = process_info(SenderPid, registered_name),
     case BestValue of
         CurrentValue ->
             case CurrentValue of
                 SavedValue ->
                     SavedValue;
                 _ ->
-                    replica_fix(Key, CurrentValue, SenderPid),
+                    replica_fix(Key, CurrentValue, SenderName),
                     CurrentValue
             end;
         _ ->
@@ -276,15 +352,23 @@ ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
 %% Generates a new order for the given reference.
 %% """
 -spec generate_order(
-    key(), order_ref(), list(replica()), consistency(), dict_order(), operation()
+    key(), order_ref(), list(replica()), consistency(), dict_order(), operation(), operation_data()
 ) -> dict_order().
-generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op) ->
+generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op, OpData) ->
     Order = #order{
         op = Op,
+        op_data = OpData,
         expected_responses = get_expected_responses(length(ListReplicas), Consistency),
         responses = 0,
         best_value = {not_found},
-        key = Key
+        key = Key,
+        pending_replicas = ListReplicas,
+        timeoutTimer = element(
+            2,
+            timer:apply_after(?ORDER_TIMEOUT, replica, request_order_fullfilment, [
+                Ref, self(), OpData, ListReplicas, Op
+            ])
+        )
     },
     dict:store(Ref, Order, OrderData).
 %% @doc """

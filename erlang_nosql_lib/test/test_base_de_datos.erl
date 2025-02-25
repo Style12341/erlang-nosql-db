@@ -58,8 +58,6 @@ fix_consistency_test() ->
     Ts = get_ts(),
     ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, Bdd1)),
     replica:stop(bdd_2),
-    %Eventually consistent
-    timer:sleep(1),
     ?assertEqual({ok, Value, Ts}, replica:get(Key, quorum, Bdd1)),
     ?assertEqual({ok, Value, Ts}, replica:get(Key, one, Bdd2)),
     ?assertEqual({ok}, replica:del(Key, Ts, all, Bdd1)),
@@ -76,7 +74,6 @@ maintain_consistency_test() ->
         replica:stop(list_to_atom(Name ++ integer_to_list(Append)))
      || Name <- [NameBdd ++ "_"], Append <- lists:seq(1, 4)
     ],
-    timer:sleep(1),
     ?assertEqual({ok, Value, Ts}, replica:get(Key, quorum, Bdd1)),
     ?assertEqual({ok}, replica:del(Key, Ts, all, Bdd2)),
     stop_bdd(NameBdd).
