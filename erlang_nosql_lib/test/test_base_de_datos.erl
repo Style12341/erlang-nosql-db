@@ -24,6 +24,26 @@ stop_bdd(Name) ->
 replica_atom(Name, Int) ->
     list_to_atom(Name ++ "_" ++ Int).
 
+start_test() ->
+    Name = start_bdd(),
+    %Check if all replicas are alive
+    [
+        ?assertNotEqual(undefined, whereis(replica_atom(Name, integer_to_list(Replica))))
+     || Replica <- lists:seq(1, 10)
+    ],
+    stop_bdd(Name).
+
+start_stop_test() ->
+    Name = start_bdd(),
+    Pid = whereis(list_to_atom(Name)),
+    ?assertEqual({error, {already_started, Pid}}, base_de_datos:start(list_to_atom(Name), 10)),
+    ?assertEqual(true, base_de_datos:stop(list_to_atom(Name))),
+    ok.
+stop_bdd_test() ->
+    Name = start_bdd(),
+    ?assertEqual(true, base_de_datos:stop(list_to_atom(Name))),
+    ok.
+
 put_get_test() ->
     Name = start_bdd(),
     Key = key,
