@@ -114,7 +114,7 @@ del(Key, Ts, Consistency, Name, Retry) ->
             case Retry of
                 true ->
                     timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
-                    del(Key, Ts, Consistency, Name, Retry);
+                    del(Key, Ts, Consistency, Name, false);
                 false ->
                     {error, {name_not_found}}
             end
