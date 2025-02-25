@@ -32,12 +32,12 @@
 -type put_reply() :: {ok} | {ko} | {not_found}.
 -type get_reply() :: {ok, value(), timestamp()} | {ko, timestamp()} | {not_found}.
 -type del_reply() :: {ok} | {ko} | {not_found}.
--type timestamp() :: integer().
+-type timestamp() :: non_neg_integer().
 -type replica() :: atom().
 -type key() :: term().
 -type value() :: term().
 -type operation() :: get | put | del.
--type order_ref() :: {pid_ref(), integer()}.
+-type order_ref() :: {pid_ref(), timestamp()}.
 -type pid_ref() :: pid() | reference().
 -type dict_data() :: dict:dict(key(), {value(), timestamp()}).
 -type operation_value() :: get_reply().
