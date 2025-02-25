@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 -define(DELETE_VALUE, n2FlOTg0OWYtY2E4Zi00NjBhLTljNjgtYjQzNzQ1ZjYyZjAw).
 -define(FAKE_PID, make_ref()).
-
+-define(TIMEOUT_VALUE, 1000).
 %% Define a record for the order -- 5 fields as expected.
 -record(order, {
     op :: operation(),
@@ -30,7 +30,7 @@
 -type key() :: term().
 -type value() :: term().
 -type operation() :: get | put | del.
--type order_ref() :: pid() | reference().
+-type order_ref() :: {pid_ref(), integer()}.
 -type pid_ref() :: pid() | reference().
 -type dict_data() :: dict:dict(key(), {value(), timestamp()}).
 -type operation_value() :: get_reply().
@@ -70,9 +70,10 @@ stop(Name) ->
 %% """
 -spec get(key(), consistency(), replica()) -> get_reply().
 get(Key, Consistency, Name) ->
-    gen_server:call(Name, {get, Key, Consistency}),
+    TimeStamp = gen_server:call(Name, {get, Key, Consistency}),
     receive
-        {reply, Answer} -> Answer
+        {reply, TimeStamp, Answer} -> Answer
+    after ?TIMEOUT_VALUE -> {timeout}
     end.
 
 %% @doc """
@@ -80,9 +81,10 @@ get(Key, Consistency, Name) ->
 %% """
 -spec del(key(), timestamp(), consistency(), replica()) -> del_reply().
 del(Key, Ts, Consistency, Name) ->
-    gen_server:call(Name, {del, Key, Ts, Consistency}),
+    TimeStamp = gen_server:call(Name, {del, Key, Ts, Consistency}),
     receive
-        {reply, Answer} -> Answer
+        {reply, TimeStamp, Answer} -> Answer
+    after ?TIMEOUT_VALUE -> {timeout}
     end.
 
 %% @doc """
@@ -90,9 +92,10 @@ del(Key, Ts, Consistency, Name) ->
 %% """
 -spec put(key(), value(), timestamp(), consistency(), replica()) -> put_reply().
 put(Key, Value, Ts, Consistency, Name) ->
-    gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
+    TimeStamp = gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
     receive
-        {reply, Answer} -> Answer
+        {reply, TimeStamp, Answer} -> Answer
+    after ?TIMEOUT_VALUE -> {timeout}
     end.
 
 %%%-------------------------------------------------------------------
@@ -130,20 +133,28 @@ replica_fix(Key, Value, Replica) ->
 -spec handle_call(any(), {pid(), any()}, state()) -> {reply, any(), state()}.
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
-    NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, put),
-    NewShinyData = new_order(Pid, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
+    Ref = generate_order_ref(Pid),
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, put),
+    NewShinyData = new_order(Ref, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
+    {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
-    NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, del),
-    NewShinyData = new_order(Pid, {Key, Ts}, Data, Cons, ListReplicas, del),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
+    Ref = generate_order_ref(Pid),
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, del),
+    NewShinyData = new_order(Ref, {Key, Ts}, Data, Cons, ListReplicas, del),
+    {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
     {Pid, _} = From,
-    NewOrderData = generate_order(Key, Pid, ListReplicas, Cons, OrderData, get),
-    NewShinyData = new_order(Pid, {Key}, Data, Cons, ListReplicas, get),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}}.
+    Ref = generate_order_ref(Pid),
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, get),
+    NewShinyData = new_order(Ref, {Key}, Data, Cons, ListReplicas, get),
+    {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}}.
 
+-spec generate_order_ref(pid_ref()) -> order_ref().
+generate_order_ref(Pid) ->
+    {Mega, Sec, Micro} = os:timestamp(),
+    TsInt = Mega * 1000000 * 1000000 + Sec * 1000000 + Micro,
+    {Pid, TsInt}.
 %% @doc """
 %% Handles the cast messages for the gen_server.
 %% """
@@ -225,10 +236,13 @@ update_coordinator(Key, _, _, ValueToSave, Data) ->
 increment_order_data_responses(
     ExpectedResponses, Responses, Op, Ref, NewBestValue, Order, OrderData
 ) ->
+    io:format("Incrementing order data responses~n"),
     NewResponses = Responses + 1,
     case NewResponses of
         ExpectedResponses ->
-            Ref ! {reply, format_client_response(Op, NewBestValue)},
+            io:format("All responses received~n"),
+            {Pid, Ts} = Ref,
+            Pid ! {reply, Ts, format_client_response(Op, NewBestValue)},
             dict:erase(Ref, OrderData);
         _ ->
             OrderNew = Order#order{
@@ -324,7 +338,8 @@ request_order_fullfilment(Ref, PidCoordinador, OpData, [Replica | Rest], Op) ->
 propagate_operation(_, _, []) ->
     ok;
 propagate_operation(Op, OpData, [Replica | Rest]) ->
-    apply_replica_operation(Op, OpData, ?FAKE_PID, ?FAKE_PID, Replica),
+    Ref = generate_order_ref(?FAKE_PID),
+    apply_replica_operation(Op, OpData, ?FAKE_PID, Ref, Replica),
     propagate_operation(Op, OpData, Rest).
 
 %% @doc """
