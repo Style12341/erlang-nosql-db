@@ -1,43 +1,66 @@
+%%%% filepath: /g:/Other computers/My Computer/DriveSynced/UTN/Programacion Concurrente/Erlang/erlang-nosql-db/erlang_nosql_lib/src/base_de_datos.erl
 -module(base_de_datos).
--export[start/2,stop/0,loop/2].
+-behaviour(supervisor).
 
-start(Name,CantReplicas) ->
-    Names=generate_replicas_names(Name,CantReplicas,[]),
-    start_replicas(Names,Names),
-    PID = spawn(?MODULE,loop,[Name,CantReplicas]),
-    register(?MODULE,PID).
+%% API
+-export([start/2, stop/1]).
 
-stop() ->
-    ?MODULE ! stop.
+%% Supervisor callbacks
+-export([init/1]).
 
-loop(Name, CantReplicas) ->
-    receive
-        stop -> stop_replicas(Name, CantReplicas)
-    end.
+%% Utility functions used in child specs
+-export([generate_replicas_names/3, generate_correct_arguments/2]).
 
-stop_replicas(Name, CantReplicas) ->
-    Names = generate_replicas_names(Name, CantReplicas, []),
-    stop_replicas(Names).
+%%--------------------------------------------------------------------
+%% API functions
+%%--------------------------------------------------------------------
+-spec start(atom(), non_neg_integer()) -> {ok, pid()} | {error, term()}.
+start(_,NegInt) when NegInt =< 0 -> {error, "CantReplicas must be a natural integer"};
+start(Name, CantReplicas) when is_atom(Name) ->
+    %% Register the supervisor as 'nosql_db'
+    NewName = atom_to_list(Name),
+    supervisor:start_link({local, Name}, ?MODULE, {NewName, CantReplicas});
+start(Name, CantReplicas) ->
+    NewName = list_to_atom(Name),
+    supervisor:start_link({local, NewName}, ?MODULE, {Name, CantReplicas}).
+-spec stop(atom()) -> true.
+stop(Name) when is_atom(Name) ->
+    exit(whereis(Name), shutdown);
+stop(Name) ->
+    NewName = list_to_atom(Name),
+    exit(whereis(NewName), shutdown).
 
-stop_replicas([]) ->
-    ok;
-stop_replicas([CurrName | LeftNames]) ->
-    replica:stop(CurrName),
-    stop_replicas(LeftNames).
+%%--------------------------------------------------------------------
+%% Supervisor callbacks
+%%--------------------------------------------------------------------
+init({SupName, CantReplicas}) ->
+    %% Generate a list of replica names
+    Names = generate_replicas_names(SupName, CantReplicas, []),
+    %% Build a child spec for each replica. Each replica receives its own Name and a list of other replicas.
+    ChildSpecs = [child_spec(RepName, Names) || RepName <- Names],
+    %% one_for_one: if a child crashes, only that child is restarted.
+    {ok, {{one_for_one, 5, 10}, ChildSpecs}}.
 
-start_replicas([],_) ->
-    ok;
-start_replicas([CurrName | LeftNames], Names) ->
-    [CurrName, ListNames] = generate_correct_arguments(CurrName, Names),
-    replica:start(CurrName, ListNames),
-    start_replicas(LeftNames, Names).
+child_spec(Name, ListNames) ->
+    %% Compute the correct arguments: [Name, ListOfOtherReplicas]
+    CorrectArgs = generate_correct_arguments(Name, ListNames),
+    %% The child spec will call replica:start_link/2 with a permanent restart type
+    {Name, {replica, start, CorrectArgs}, permanent, 5000, worker, [replica]}.
 
-generate_correct_arguments(Name, ListNames) ->
-    NewListNames = lists:subtract(ListNames, [Name]),
-    [Name, NewListNames].
-
+%%--------------------------------------------------------------------
+%% Replica name utilities
+%%--------------------------------------------------------------------
 generate_replicas_names(_, 0, Names) ->
     Names;
-generate_replicas_names(Name, CantReplicas, Names) when CantReplicas > 0 ->
-    NewName = list_to_atom(Name ++ "_" ++ integer_to_list(CantReplicas)),
-    generate_replicas_names(Name, CantReplicas - 1, [NewName | Names]).
+generate_replicas_names(BaseName, CantReplicas, Names) when CantReplicas > 0 ->
+    NewName = list_to_atom(BaseName ++ "_" ++ integer_to_list(CantReplicas)),
+    generate_replicas_names(BaseName, CantReplicas - 1, [NewName | Names]).
+
+generate_correct_arguments(Name, ListNames) ->
+    %% Get Current index of name if name is name_1 then index is 0
+    NewListNames = generate_ring(Name, ListNames, []),
+    [Name, NewListNames].
+generate_ring(Name, [Name | Rest], HeadNames) ->
+    Rest ++ HeadNames;
+generate_ring(Name, [Curr | Rest], HeadNames) ->
+    generate_ring(Name, Rest, HeadNames ++ [Curr]).

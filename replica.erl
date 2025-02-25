@@ -2,312 +2,521 @@
 -behaviour(gen_server).
 -define(DELETE_VALUE, n2FlOTg0OWYtY2E4Zi00NjBhLTljNjgtYjQzNzQ1ZjYyZjAw).
 -define(FAKE_PID, make_ref()).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-define(TIMEOUT_VALUE, 1000).
+-define(ORDER_TIMEOUT, 100).
+-define(TIMEOUT_RETRY_OP_VALUE, 5).
+%% Define a record for the order -- 5 fields as expected.
+-record(order, {
+    op :: operation(),
+    op_data :: operation_data(),
+    expected_responses :: response_qty(),
+    responses :: response_qty(),
+    best_value :: operation_value(),
+    key :: key(),
+    pending_replicas :: list(replica()),
+    timeoutTimer :: timer:tref()
+}).
+
+%%%-------------------------------------------------------------------
+%%% Exported functions
+%%%-------------------------------------------------------------------
+-export([
+    init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, request_order_fullfilment/5
+]).
 -export([start/2, stop/1, put/5, del/4, get/3]).
 
-%% @doc
+%%%-------------------------------------------------------------------
+%%% Types
+%%%-------------------------------------------------------------------
+-type consistency() :: one | quorum | all.
+-type put_reply() :: {ok} | {ko} | {not_found}.
+-type get_reply() :: {ok, value(), timestamp()} | {ko, timestamp()} | {not_found}.
+-type del_reply() :: {ok} | {ko} | {not_found}.
+-type timestamp() :: integer().
+-type replica() :: atom().
+-type key() :: term().
+-type value() :: term().
+-type operation() :: get | put | del.
+-type order_ref() :: {pid_ref(), integer()}.
+-type pid_ref() :: pid() | reference().
+-type dict_data() :: dict:dict(key(), {value(), timestamp()}).
+-type operation_value() :: get_reply().
+-type operation_data() :: {key()} | {key(), value(), timestamp()} | {key(), timestamp()}.
+-type response_qty() :: integer().
+
+%% Instead of tuple orders, we use our record.
+-type dict_order() :: dict:dict(order_ref(), #order{}).
+
+-type state() :: {dict_data(), list(replica()), dict_order()}.
+
+%% @doc """
 %% Starts the replica server with the given name and list of replicas.
-%% @spec start(atom(), list()) -> {ok, pid()} | {error, any()}
+%% """
+-spec start(replica(), list(replica())) -> {ok, pid()} | {error, state()}.
 start(Name, ListReplicas) ->
-    % Estado Inicial {Datos, Lista de replicas, Datos de pedidos}
-    % Datos de pedidos es un diccionario con un numero de PID de cliente como clave y una lista de tuplas {Operacion, ExpectedResponses, Responses, BestValue} como valor
+    %% Estado Inicial: {Data, ListReplicas, OrderData}
     gen_server:start_link({local, Name}, ?MODULE, {dict:new(), ListReplicas, dict:new()}, []).
 
-%% @doc
-%% Initializes the server state.
-%% @spec init(any()) -> {ok, any()}
+-spec init(any()) -> {ok, state()}.
 init(Args) ->
     {ok, Args}.
 
-%% @doc
-%% Terminates the server.
-%% @spec terminate(any(), any()) -> ok
+-spec terminate(any(), any()) -> ok.
 terminate(_Reason, _Data) ->
     ok.
 
-%% @doc
+%% @doc """
 %% Stops the replica server with the given name.
-%% @spec stop(atom()) -> ok
+%% """
+-spec stop(replica()) -> ok.
 stop(Name) ->
     gen_server:cast(Name, stop).
 
-%% @doc
+%% @doc """
 %% Gets the value associated with the given key from the replica server.
-%% @spec get(any(), atom(), atom()) -> any()
+%% """
+-spec get(key(), consistency(), replica()) -> get_reply() | {error, {name_not_found}}.
 get(Key, Consistency, Name) ->
-    gen_server:call(Name, {get, Key, Consistency}),
-    receive
-        {reply, Answer} -> Answer
+    get(Key, Consistency, Name, true).
+get(Key, Consistency, Name, Retry) ->
+    try
+        TimeStamp = gen_server:call(Name, {get, Key, Consistency}),
+        receive
+            {reply, TimeStamp, Answer} -> Answer
+        after ?TIMEOUT_VALUE -> {timeout}
+        end
+    catch
+        exit:{_, _} ->
+            case Retry of
+                true ->
+                    timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
+                    get(Key, Consistency, Name, false);
+                false ->
+                    {error, {name_not_found}}
+            end
     end.
 
-%% @doc
+%% @doc """
 %% Deletes the value associated with the given key from the replica server.
-%% @spec del(any(), any(), atom(), atom()) -> any()
+%% """
+-spec del(key(), timestamp(), consistency(), replica()) -> del_reply() | {error, {name_not_found}}.
 del(Key, Ts, Consistency, Name) ->
-    gen_server:call(Name, {del, Key, Ts, Consistency}),
-    receive
-        {reply, Answer} -> Answer
+    del(Key, Ts, Consistency, Name, true).
+del(Key, Ts, Consistency, Name, Retry) ->
+    try
+        TimeStamp = gen_server:call(Name, {del, Key, Ts, Consistency}),
+        receive
+            {reply, TimeStamp, Answer} -> Answer
+        after ?TIMEOUT_VALUE -> {timeout}
+        end
+    catch
+        exit:{_, _} ->
+            case Retry of
+                true ->
+                    timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
+                    del(Key, Ts, Consistency, Name, false);
+                false ->
+                    {error, {name_not_found}}
+            end
     end.
 
-%% @doc
+%% @doc """
 %% Puts the given value associated with the given key into the replica server.
-%% @spec put(any(), any(), any(), atom(), atom()) -> any()
+%% """
+-spec put(key(), value(), timestamp(), consistency(), replica()) ->
+    put_reply() | {error, {name_not_found}}.
 put(Key, Value, Ts, Consistency, Name) ->
-    gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
-    receive
-        {reply, Answer} -> Answer
+    put(Key, Value, Ts, Consistency, Name, true).
+put(Key, Value, Ts, Consistency, Name, Retry) ->
+    try
+        TimeStamp = gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
+        receive
+            {reply, TimeStamp, Answer} -> Answer
+        after ?TIMEOUT_VALUE -> {timeout}
+        end
+    catch
+        exit:{_, _} ->
+            case Retry of
+                true ->
+                    timer:sleep(?TIMEOUT_RETRY_OP_VALUE),
+                    put(Key, Value, Ts, Consistency, Name, false);
+                false ->
+                    {error, {name_not_found}}
+            end
     end.
 
-%% @doc
-%% Handles the get request from a replica.
-%% @spec replica_get(pid(), reference(), any(), atom()) -> any()
+%%%-------------------------------------------------------------------
+%%% Replica Functions
+%%%-------------------------------------------------------------------
+-spec replica_get(pid_ref(), order_ref(), key(), replica()) -> ok.
 replica_get(PidCoordinador, Ref, Key, Replica) ->
-    io:format("[replica_get] PidCoordinador=~p, Ref=~p, Key=~p, Replica=~p~n", [
-        PidCoordinador, Ref, Key, Replica
-    ]),
-    gen_server:call(Replica, {replica_get, PidCoordinador, Ref, Key}).
+    gen_server:cast(Replica, {replica_get, PidCoordinador, Ref, Key}).
 
-%% @doc
+%% @doc """
 %% Handles the put request from a replica.
-%% @spec replica_put(pid(), reference(), any(), any(), any(), atom()) -> any()
+%% """
+-spec replica_put(pid_ref(), order_ref(), key(), value(), timestamp(), replica()) -> ok.
 replica_put(PidCoordinador, Ref, Key, Value, Ts, Replica) ->
-    io:format("[replica_put] PidCoordinador=~p, Ref=~p, Key=~p, Value=~p, Ts=~p, Replica=~p~n", [
-        PidCoordinador, Ref, Key, Value, Ts, Replica
-    ]),
-    gen_server:call(Replica, {replica_put, Key, Value, Ts, PidCoordinador, Ref}).
+    gen_server:cast(Replica, {replica_put, Key, Value, Ts, PidCoordinador, Ref}).
 
-%% @doc
+%% @doc """
 %% Handles the delete request from a replica.
-%% @spec replica_del(pid(), reference(), any(), any(), atom()) -> any()
+%% """
+-spec replica_del(pid_ref(), order_ref(), key(), timestamp(), replica()) -> ok.
 replica_del(PidCoordinador, Ref, Key, Ts, Replica) ->
-    io:format("[replica_del] PidCoordinador=~p, Ref=~p, Key=~p, Ts=~p, Replica=~p~n", [
-        PidCoordinador, Ref, Key, Ts, Replica
-    ]),
-    gen_server:call(Replica, {replica_del, Key, Ts, PidCoordinador, Ref}).
+    gen_server:cast(Replica, {replica_del, Key, Ts, PidCoordinador, Ref}).
 
-%% @doc
-%% Handles the call messages for the gen_server.
-%% @spec handle_call(tuple(), {pid(), any()}, {dict(), list(), dict()}) -> {reply, any(), {dict(), list(), dict()}}
+%% @doc """
+%% Fixes the replica for a given key.
+%% """
+-spec replica_fix(key(), get_reply(), replica()) ->
+    ok.
+replica_fix(Key, Value, Replica) ->
+    gen_server:cast(Replica, {replica_fix, Key, Value}).
+
+%%%-------------------------------------------------------------------
+%%% Gen_server callbacks
+%%%-------------------------------------------------------------------
+-spec handle_call(any(), {pid(), any()}, state()) -> {reply, any(), state()}.
 handle_call({put, Key, Value, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] put: Key=~p, Value=~p, Ts=~p, Cons=~p~n", [Key, Value, Ts, Cons]),
     {Pid, _} = From,
-    NewOrderData = generate_order(Pid, ListReplicas, Cons, OrderData, put),
-    NewShinyData = new_order(Pid, {Key, Value, Ts}, Data, Cons, ListReplicas, put),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-handle_call({replica_put, Key, Value, Ts, PidCoordinador, Ref}, _, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
-    {BestValue, NewData} = put_value(Key, Value, Ts, Data),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
-    {reply, ok, {NewData, ListReplicas, OrderData}};
+    Ref = generate_order_ref(Pid),
+    OpData = {Key, Value, Ts},
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, put, OpData),
+    NewShinyData = new_order(Ref, OpData, Data, Cons, ListReplicas, put),
+    {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({del, Key, Ts, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] del: Key=~p, Ts=~p, Cons=~p~n", [Key, Ts, Cons]),
     {Pid, _} = From,
-    NewOrderData = generate_order(Pid, ListReplicas, Cons, OrderData, del),
-    NewShinyData = new_order(Pid, {Key, Ts}, Data, Cons, ListReplicas, del),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-handle_call({replica_del, Key, Ts, PidCoordinador, Ref}, _, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_del: Key=~p, Ts=~p~n", [Key, Ts]),
-    {BestValue, NewData} = delete_value(Key, Ts, Data),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
-    {reply, ok, {NewData, ListReplicas, OrderData}};
+    Ref = generate_order_ref(Pid),
+    OpData = {Key, Ts},
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, del, OpData),
+    NewShinyData = new_order(Ref, OpData, Data, Cons, ListReplicas, del),
+    {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}};
 handle_call({get, Key, Cons}, From, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] get: Key=~p, Cons=~p~n", [Key, Cons]),
-    % Pid -> {get, ExpectedResponses, Responses, BestValue}
     {Pid, _} = From,
-    NewOrderData = generate_order(Pid, ListReplicas, Cons, OrderData, get),
-    NewShinyData = new_order(Pid, {Key}, Data, Cons, ListReplicas, get),
-    {reply, {wait}, {NewShinyData, ListReplicas, NewOrderData}};
-handle_call({replica_get, PidCoordinador, Ref, Key}, _, {Data, ListReplicas, OrderData}) ->
-    io:format("[handle_call] replica_get: Key=~p CoordinatorPid=~p~n", [Key, PidCoordinador]),
-    Value = get_value(Key, Data),
-    PidCoordinador ! {fulfill_order, Ref, Value},
-    {reply, ok, {Data, ListReplicas, OrderData}}.
+    Ref = generate_order_ref(Pid),
+    OpData = {Key},
+    NewOrderData = generate_order(Key, Ref, ListReplicas, Cons, OrderData, get, OpData),
+    NewShinyData = new_order(Ref, OpData, Data, Cons, ListReplicas, get),
+    {reply, element(2, Ref), {NewShinyData, ListReplicas, NewOrderData}}.
 
-%% @doc
+-spec generate_order_ref(pid_ref()) -> order_ref().
+generate_order_ref(Pid) ->
+    {Mega, Sec, Micro} = os:timestamp(),
+    TsInt = Mega * 1000000 * 1000000 + Sec * 1000000 + Micro,
+    {Pid, TsInt}.
+%% @doc """
 %% Handles the cast messages for the gen_server.
-%% @spec handle_cast(atom(), any()) -> {stop, normal, ok}
+%% """
+-spec handle_cast(any(), state()) -> {noreply, state()}.
+handle_cast({replica_put, Key, Value, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
+    {BestValue, NewData} = put_value(Key, Value, Ts, Data),
+    SavedValue = get_value(Key, NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
+    {noreply, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_del, Key, Ts, PidCoordinador, Ref}, {Data, ListReplicas, OrderData}) ->
+    {BestValue, NewData} = delete_value(Key, Ts, Data),
+    SavedValue = get_value(Key, NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
+    {noreply, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_get, PidCoordinador, Ref, Key}, {Data, ListReplicas, OrderData}) ->
+    Value = get_value(Key, Data),
+    PidCoordinador ! {fulfill_order, self(), Ref, Value, Value},
+    {noreply, {Data, ListReplicas, OrderData}};
+handle_cast({replica_fix, Key, {ok, Value, Ts}}, {Data, ListReplicas, OrderData}) ->
+    {_, NewData} = put_value(Key, Value, Ts, Data),
+    {noreply, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_fix, Key, {ko, Ts}}, {Data, ListReplicas, OrderData}) ->
+    {_, NewData} = delete_value(Key, Ts, Data),
+    {noreply, {NewData, ListReplicas, OrderData}};
+handle_cast({replica_fix, _, {not_found}}, {Data, ListReplicas, OrderData}) ->
+    {noreply, {Data, ListReplicas, OrderData}};
 handle_cast(stop, _State) ->
     {stop, normal, ok}.
 
-%% @doc
+%% @doc """
 %% Handles the info messages for the gen_server.
-%% @spec handle_info(tuple(), {dict(), list(), dict()}) -> {noreply, {dict(), list(), dict()}}
-handle_info({fulfill_order, Ref, Value} = Info, {Data, ReplicaList, OrderData} = State) ->
-    % Print the value
-    io:format("[handle_info] fulfillorder: info: ~p state: ~p pidReceiver: ~p~n", [
-        Info, State, self()
-    ]),
-    {Op, ExpectedResponses, Responses, BestValue} = dict:fetch(Ref, OrderData),
-    io:format(
-        "[handle_info] fulfillorder: Op=~p, ExpectedResponses=~p, Responses=~p, BestValue=~p~n", [
-            Op, ExpectedResponses, Responses, BestValue
-        ]
+%% """
+-spec handle_info(any(), state()) -> {noreply, state()}.
+handle_info({fulfill_order, SenderPid, Ref, Value, SavedValue}, {Data, ReplicaList, OrderData}) ->
+    case dict:find(Ref, OrderData) of
+        {ok,
+            Order = #order{
+                op = Op,
+                expected_responses = ExpectedResponses,
+                responses = Responses,
+                best_value = BestValue,
+                key = Key,
+                pending_replicas = PendingReplicas,
+                timeoutTimer = TimeoutTimer,
+                op_data = OpData
+            }} ->
+            NewOrder = reset_timeout_timer(
+                TimeoutTimer, SenderPid, Ref, PendingReplicas, Op, OpData, Order
+            ),
+            NewBestValue = compare_values(Value, BestValue),
+            NewData = update_coordinator(Key, NewBestValue, Value, SavedValue, Data),
+            ensure_sender_consistency(SenderPid, Key, SavedValue, NewData),
+            NewOrderData = increment_order_data_responses(
+                ExpectedResponses, Responses, Op, Ref, NewBestValue, NewOrder, OrderData
+            ),
+            {noreply, {NewData, ReplicaList, NewOrderData}};
+        _ ->
+            {noreply, {Data, ReplicaList, OrderData}}
+    end;
+handle_info(_Info, State) ->
+    {noreply, State}.
+
+-spec reset_timeout_timer(
+    timer:tref(),
+    pid_ref(),
+    order_ref(),
+    list(replica()),
+    operation(),
+    operation_data(),
+    #order{}
+) ->
+    #order{}.
+reset_timeout_timer(TimeoutTimer, SenderPid, Ref, PendingReplicas, Op, OpData, OrderData) ->
+    {_, SenderName} = process_info(SenderPid, registered_name),
+    NewReplicaList = lists:delete(SenderName, PendingReplicas),
+    timer:cancel(TimeoutTimer),
+    NewTimer = element(
+        2,
+        timer:apply_after(?ORDER_TIMEOUT, replica, request_order_fullfilment, [
+            Ref, self(), OpData, PendingReplicas, Op
+        ])
     ),
-    NewBestValue = compare_values(Value, BestValue),
-    % PidNode ! {reply, NewBestValue},
+    OrderData#order{pending_replicas = NewReplicaList, timeoutTimer = NewTimer}.
+
+-spec update_coordinator(key(), operation_value(), operation_value(), get_reply(), dict_data()) ->
+    dict_data().
+%% @doc """
+%% Updates the coordinator with the new value received from a replica if necessary.
+%% """
+update_coordinator(_, Value, Value, _, Data) ->
+    Data;
+update_coordinator(Key, _, _, ValueToSave, Data) ->
+    {_, ND} = put_value(Key, ValueToSave, Data),
+    ND.
+%% @doc """
+%% Increments the number of responses for the given order. Ends the order if all responses are received.
+%% """
+-spec increment_order_data_responses(
+    response_qty(),
+    response_qty(),
+    operation(),
+    order_ref(),
+    operation_value(),
+    #order{},
+    dict_order()
+) -> dict_order().
+increment_order_data_responses(
+    ExpectedResponses, Responses, Op, Ref, NewBestValue, Order, OrderData
+) ->
     NewResponses = Responses + 1,
     case NewResponses of
         ExpectedResponses ->
-            io:format("[handle_info] Answering Value: ~p to PID ~p~n", [ExpectedResponses, Ref]),
-            Ref ! {reply, NewBestValue},
-            NewOrderData = dict:erase(Ref, OrderData);
+            {Pid, Ts} = Ref,
+            Pid ! {reply, Ts, format_client_response(Op, NewBestValue)},
+            dict:erase(Ref, OrderData);
         _ ->
-            NewOrderData = dict:store(
-                Ref, {Op, ExpectedResponses, NewResponses, NewBestValue}, OrderData
-            )
-    end,
-    {noreply, {Data, ReplicaList, NewOrderData}};
-handle_info(_Info, State) ->
-    io:format("[handle_info] unknown info: ~p state: ~p pidReceiver: ~p~n", [_Info, State, self()]),
-    {noreply, State}.
+            OrderNew = Order#order{
+                responses = NewResponses,
+                best_value = NewBestValue
+            },
+            dict:store(Ref, OrderNew, OrderData)
+    end.
+%% @doc """
+%% Ensures consistency for the sender.
+%% """
+-spec ensure_sender_consistency(pid(), key(), get_reply(), dict_data()) -> get_reply().
+ensure_sender_consistency(SenderPid, Key, SavedValue, Data) ->
+    CurrentValue = get_value(Key, Data),
+    BestValue = compare_values(CurrentValue, SavedValue),
+    {_, SenderName} = process_info(SenderPid, registered_name),
+    case BestValue of
+        CurrentValue ->
+            case CurrentValue of
+                SavedValue ->
+                    SavedValue;
+                _ ->
+                    replica_fix(Key, CurrentValue, SenderName),
+                    CurrentValue
+            end;
+        _ ->
+            SenderPid ! {reply, BestValue},
+            BestValue
+    end.
 
-%% @doc
+%% @doc """
 %% Generates a new order for the given reference.
-%% @spec generate_order(reference(), list(), atom(), dict(), atom()) -> dict()
-generate_order(Ref, ListReplicas, Consistency, OrderData, Op) ->
-    io:format("[generate_order] Ref=~p, Consistency=~p, Op=~p~n", [Ref, Consistency, Op]),
-    dict:store(
-        Ref,
-        {Op, get_expected_responses(length(ListReplicas), Consistency), 0, {not_found}},
-        OrderData
-    ).
-
-%% @doc
+%% """
+-spec generate_order(
+    key(), order_ref(), list(replica()), consistency(), dict_order(), operation(), operation_data()
+) -> dict_order().
+generate_order(Key, Ref, ListReplicas, Consistency, OrderData, Op, OpData) ->
+    Order = #order{
+        op = Op,
+        op_data = OpData,
+        expected_responses = get_expected_responses(length(ListReplicas), Consistency),
+        responses = 0,
+        best_value = {not_found},
+        key = Key,
+        pending_replicas = ListReplicas,
+        timeoutTimer = element(
+            2,
+            timer:apply_after(?ORDER_TIMEOUT, replica, request_order_fullfilment, [
+                Ref, self(), OpData, ListReplicas, Op
+            ])
+        )
+    },
+    dict:store(Ref, Order, OrderData).
+%% @doc """
 %% Gets the expected number of responses based on the consistency level.
-%% @spec get_expected_responses(integer(), atom()) -> integer()
+%% """
+-spec get_expected_responses(integer(), consistency()) -> response_qty().
 get_expected_responses(Length, Consistency) ->
-    io:format("[get_expected_responses] Length=~p, Consistency=~p~n", [Length, Consistency]),
     case Consistency of
         one -> 1;
         quorum -> (Length) div 2 + 1;
-        all -> Length
+        all -> Length + 1
     end.
 
-%% @doc
+%% @doc """
 %% Creates a new order based on the consistency level.
-%% @spec new_order(reference(), tuple(), dict(), atom(), list(), atom()) -> dict()
-new_order(Ref, OpData, Data, one, _, Op) ->
-    io:format("[new_order] one: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
+%% """
+-spec new_order(
+    order_ref(), operation_data(), dict_data(), consistency(), list(replica()), operation()
+) ->
+    dict_data().
+new_order(Ref, OpData, Data, one, ListReplicas, Op) ->
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    SavedValue = get_value(element(1, OpData), NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
+    propagate_operation(Op, OpData, ListReplicas),
     NewData;
-new_order(Ref, OpData, Data, quorum, ListReplicas, Op) ->
-    io:format("[new_order] quorum: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
+new_order(Ref, OpData, Data, _, ListReplicas, Op) ->
     {BestValue, NewData} = apply_operation(Op, OpData, Data),
     PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
-    Size = length(ListReplicas) div 2,
-    NewList = lists:sublist(ListReplicas, Size),
-    io:format("[new_order] quorum: Size=~p, NewList=~p~n", [Size, NewList]),
-    PropagateOpList = lists:subtract(ListReplicas, NewList),
-    request_order_fullfilment(Ref, PidCoordinador, OpData, NewList, Op),
-    propagate_operation(Op, OpData, PropagateOpList),
-    NewData;
-new_order(Ref, OpData, Data, all, ListReplicas, Op) ->
-    io:format("[new_order] all: Ref=~p, OpData=~p, Op=~p~n", [Ref, OpData, Op]),
-    {BestValue, NewData} = apply_operation(Op, OpData, Data),
-    PidCoordinador = self(),
-    PidCoordinador ! {fulfill_order, Ref, BestValue},
+    SavedValue = get_value(element(1, OpData), NewData),
+    PidCoordinador ! {fulfill_order, self(), Ref, BestValue, SavedValue},
     request_order_fullfilment(Ref, PidCoordinador, OpData, ListReplicas, Op),
     NewData.
 
-%% @doc
+%% @doc """
 %% Requests the fulfillment of an order.
-%% @spec request_order_fullfilment(reference(), pid(), tuple(), list(), atom()) -> ok
+%% """
+-spec request_order_fullfilment(order_ref(), pid(), operation_data(), list(replica()), operation()) ->
+    ok.
 request_order_fullfilment(_, _, _, [], _) ->
-    io:format("[request_order_fullfilment] done~n"),
     ok;
 request_order_fullfilment(Ref, PidCoordinador, OpData, [Replica | Rest], Op) ->
-    io:format("[request_order_fullfilment] Ref=~p, Replica=~p, Op=~p~n", [Ref, Replica, Op]),
     apply_replica_operation(Op, OpData, PidCoordinador, Ref, Replica),
     request_order_fullfilment(Ref, PidCoordinador, OpData, Rest, Op).
 
-%% @doc
+%% @doc """
 %% Propagates the operation to the replicas.
-%% @spec propagate_operation(atom(), tuple(), list()) -> ok
+%% """
+-spec propagate_operation(operation(), operation_data(), list(replica())) -> ok.
 propagate_operation(_, _, []) ->
-    io:format("[propagate_operation] done~n"),
     ok;
 propagate_operation(Op, OpData, [Replica | Rest]) ->
-    io:format("[propagate_operation] Op=~p, Replica=~p~n", [Op, Replica]),
-    % Generate a fake pid for the coordinator
-    apply_replica_operation(Op, OpData, ?FAKE_PID, ?FAKE_PID, Replica),
+    Ref = generate_order_ref(?FAKE_PID),
+    apply_replica_operation(Op, OpData, ?FAKE_PID, Ref, Replica),
     propagate_operation(Op, OpData, Rest).
 
-%% @doc
+%% @doc """
 %% Compares two values and returns the best one.
-%% @spec compare_values(tuple(), tuple()) -> tuple()
-compare_values({ok, _, Ts} = BestValue, {ko, BestTs}) when Ts > BestTs -> BestValue;
+%% """
+-spec compare_values(operation_value(), operation_value()) -> operation_value().
+compare_values({ok, _, BestTs} = BestValue, {ko, Ts}) when BestTs > Ts -> BestValue;
 compare_values({ok, _, _}, {ko, _} = BestValue) -> BestValue;
-compare_values({ok, _, Ts} = BestValue, {ok, _, BestTs}) when Ts > BestTs -> BestValue;
+compare_values({ok, _, BestTs} = BestValue, {ok, _, Ts}) when BestTs > Ts -> BestValue;
 compare_values({ok, _, _}, {ok, _, _} = BestValue) -> BestValue;
 compare_values({ko, _} = Arg2, {ok, _, _} = Arg1) -> compare_values(Arg1, Arg2);
-compare_values({ko, Ts}, {ko, BestTs}) when Ts < BestTs -> {ko, BestTs};
-compare_values({ko, BestTs}, {ko, _}) -> {ko, BestTs};
+compare_values({ko, BestTs}, {ko, Ts}) when BestTs > Ts -> {ko, BestTs};
+compare_values({ko, _}, {ko, BestTs}) -> {ko, BestTs};
 compare_values({not_found}, BestValue) -> BestValue;
 compare_values(BestValue, {not_found}) -> BestValue.
 
-%% @doc
-%% Applies the given operation to the data.
-%% @spec apply_operation(atom(), tuple(), dict()) -> {tuple(), dict()}
+%% @doc """
+%% Applies the given operation to the data. Returns the best value and the new data.
+%% """
+-spec apply_operation(operation(), operation_data(), dict_data()) ->
+    {operation_value(), dict_data()}.
 apply_operation(get, {Key}, Data) ->
-    io:format("[apply_operation] get: Key=~p~n", [Key]),
     BestValue = get_value(Key, Data),
     {BestValue, Data};
 apply_operation(put, {Key, Value, Ts}, Data) ->
-    io:format("[apply_operation] put: Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     put_value(Key, Value, Ts, Data);
 apply_operation(del, {Key, Ts}, Data) ->
-    io:format("[apply_operation] del: Key=~p, Ts=~p~n", [Key, Ts]),
     delete_value(Key, Ts, Data).
 
-%% @doc
-%% Applies the given operation to a replica.
-%% @spec apply_replica_operation(atom(), tuple(), pid(), reference(), atom()) -> any()
+%% @doc """
+%% Applies the given operation to a replica, passing the order ref to fulfill.
+%% """
+-spec apply_replica_operation(operation(), operation_data(), pid_ref(), order_ref(), replica()) ->
+    ok.
 apply_replica_operation(get, {Key}, PidCoordinador, Ref, Replica) ->
-    io:format("[apply_replica_operation] get: Key=~p, Replica=~p~n", [Key, Replica]),
     replica_get(PidCoordinador, Ref, Key, Replica);
 apply_replica_operation(put, {Key, Value, Ts}, PidCoordinador, Ref, Replica) ->
-    io:format("[apply_replica_operation] put: Key=~p, Value=~p, Ts=~p, Replica=~p~n", [
-        Key, Value, Ts, Replica
-    ]),
     replica_put(PidCoordinador, Ref, Key, Value, Ts, Replica);
 apply_replica_operation(del, {Key, Ts}, PidCoordinador, Ref, Replica) ->
-    io:format("[apply_replica_operation] del: Key=~p, Ts=~p, Replica=~p~n", [Key, Ts, Replica]),
     replica_del(PidCoordinador, Ref, Key, Ts, Replica).
 
-%% @doc
+%% @doc """
 %% Gets the value associated with the given key from the data.
-%% @spec get_value(any(), dict()) -> tuple()
+%% """
+-spec get_value(key(), dict_data()) -> get_reply().
 get_value(Key, Data) ->
-    io:format("[get_value] Key=~p~n", [Key]),
     case dict:find(Key, Data) of
         {ok, {?DELETE_VALUE, Ts}} -> {ko, Ts};
         {ok, {Val, Ts}} -> {ok, Val, Ts};
         _ -> {not_found}
     end.
 
-%% @doc
+%% @doc """
 %% Deletes the value associated with the given key from the data.
-%% @spec delete_value(any(), any(), dict()) -> {tuple(), dict()}
+%% """
+-spec delete_value(key(), timestamp(), dict_data()) -> {operation_value(), dict_data()}.
 delete_value(Key, Ts, Data) ->
-    io:format("[delete_value] Key=~p, Ts=~p~n", [Key, Ts]),
     case get_value(Key, Data) of
-        {ko, OldTs} when OldTs > Ts -> {{not_found}, Data};
+        {ko, NewTs} when NewTs > Ts -> {{not_found}, Data};
         {ko, _} -> {{not_found}, dict:store(Key, {?DELETE_VALUE, Ts}, Data)};
-        {ok, _, OldTs} when OldTs > Ts -> {{ko, OldTs}, Data};
+        {ok, _, NewTs} when NewTs > Ts -> {{ko, NewTs}, Data};
         {ok, _, _} -> {{ok, Ts, Ts}, dict:store(Key, {?DELETE_VALUE, Ts}, Data)};
         {not_found} -> {{not_found}, Data}
     end.
 
-%% @doc
+%% @doc """
 %% Puts the given value associated with the given key into the data.
-%% @spec put_value(any(), any(), any(), dict()) -> {tuple(), dict()}
+%% """
+-spec put_value(key(), value(), timestamp(), dict_data()) -> {operation_value(), dict_data()}.
 put_value(Key, Value, Ts, Data) ->
-    io:format("[put_value] Key=~p, Value=~p, Ts=~p~n", [Key, Value, Ts]),
     case get_value(Key, Data) of
-        {ok, _, OldTs} when OldTs > Ts -> {{ko, OldTs}, Data};
-        {ko, OldTs} when OldTs > Ts -> {{not_found}, Data};
+        {ok, _, NewTs} when NewTs > Ts -> {{ko, NewTs}, Data};
+        {ko, NewTs} when NewTs > Ts -> {{not_found}, Data};
         _ -> {{ok, Value, Ts}, dict:store(Key, {Value, Ts}, Data)}
     end.
+put_value(Key, {ok, Value, Ts}, Data) ->
+    put_value(Key, Value, Ts, Data);
+put_value(Key, {ko, Ts}, Data) ->
+    delete_value(Key, Ts, Data);
+put_value(_, {not_found}, Data) ->
+    {not_found, Data}.
+
+%% @doc """
+%% Formats the client response based on the operation and result.
+%% """
+-spec format_client_response(operation(), operation_value()) ->
+    get_reply() | put_reply() | del_reply().
+format_client_response(get, Value) ->
+    Value;
+format_client_response(_, {ok, _, _}) ->
+    {ok};
+format_client_response(_, {ko, _}) ->
+    {ko};
+format_client_response(_, RES) ->
+    RES.
