@@ -83,7 +83,9 @@ get(Key, Consistency, Name, Retry) ->
         TimeStamp = gen_server:call(Name, {get, Key, Consistency}),
         receive
             {reply, TimeStamp, Answer} -> Answer
-        after ?TIMEOUT_VALUE -> {timeout}
+        after ?TIMEOUT_VALUE ->
+            cancel_order(TimeStamp, Name),
+            {timeout}
         end
     catch
         exit:{_, _} ->
@@ -107,7 +109,9 @@ del(Key, Ts, Consistency, Name, Retry) ->
         TimeStamp = gen_server:call(Name, {del, Key, Ts, Consistency}),
         receive
             {reply, TimeStamp, Answer} -> Answer
-        after ?TIMEOUT_VALUE -> {timeout}
+        after ?TIMEOUT_VALUE ->
+            cancel_order(TimeStamp, Name),
+            {timeout}
         end
     catch
         exit:{_, _} ->
@@ -132,7 +136,9 @@ put(Key, Value, Ts, Consistency, Name, Retry) ->
         TimeStamp = gen_server:call(Name, {put, Key, Value, Ts, Consistency}),
         receive
             {reply, TimeStamp, Answer} -> Answer
-        after ?TIMEOUT_VALUE -> {timeout}
+        after ?TIMEOUT_VALUE ->
+            cancel_order(TimeStamp, Name),
+            {timeout}
         end
     catch
         exit:{_, _} ->
@@ -144,7 +150,10 @@ put(Key, Value, Ts, Consistency, Name, Retry) ->
                     {error, {name_not_found}}
             end
     end.
-
+-spec cancel_order(timestamp(), replica()) -> ok.
+cancel_order(Ts, Name) ->
+    Ref = {self(), Ts},
+    gen_server:cast(Name, {cancel_order, Ref}).
 %%%-------------------------------------------------------------------
 %%% Replica Functions
 %%%-------------------------------------------------------------------
@@ -230,6 +239,15 @@ handle_cast({replica_fix, Key, {ko, Ts}}, {Data, ListReplicas, OrderData}) ->
     {_, NewData} = delete_value(Key, Ts, Data),
     {noreply, {NewData, ListReplicas, OrderData}};
 handle_cast({replica_fix, _, {not_found}}, {Data, ListReplicas, OrderData}) ->
+    {noreply, {Data, ListReplicas, OrderData}};
+handle_cast({cancel_order, Ref}, {Data, ListReplicas, OrderData}) ->
+    case dict:find(Ref, OrderData) of
+        {ok, Order} ->
+            timer:cancel(Order#order.timeoutTimer),
+            dict:erase(Ref, OrderData);
+        _ ->
+            ok
+    end,
     {noreply, {Data, ListReplicas, OrderData}};
 handle_cast(stop, _State) ->
     {stop, normal, ok}.
