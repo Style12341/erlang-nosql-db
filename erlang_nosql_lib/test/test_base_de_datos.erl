@@ -33,6 +33,11 @@ start_test() ->
     ],
     stop_bdd(Name).
 
+start_with_negative_replicas_test() ->
+    ?assertEqual({error, "CantReplicas must be a natural integer"}, base_de_datos:start(bdd, -1)),
+    ?assertEqual({error, "CantReplicas must be a natural integer"}, base_de_datos:start(bdd, 0)),
+    ?assertNotEqual({error, "CantReplicas must be a natural integer"}, base_de_datos:start(bdd, 1)),
+    ok.
 start_stop_test() ->
     Name = start_bdd(),
     Pid = whereis(list_to_atom(Name)),
