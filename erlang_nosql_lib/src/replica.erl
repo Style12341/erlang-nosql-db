@@ -75,7 +75,7 @@ stop(Name) ->
 %% @doc """
 %% Gets the value associated with the given key from the replica server.
 %% """
--spec get(key(), consistency(), replica()) -> get_reply().
+-spec get(key(), consistency(), replica()) -> get_reply() | {error, {name_not_found}}.
 get(Key, Consistency, Name) ->
     get(Key, Consistency, Name, true).
 get(Key, Consistency, Name, Retry) ->
@@ -99,7 +99,7 @@ get(Key, Consistency, Name, Retry) ->
 %% @doc """
 %% Deletes the value associated with the given key from the replica server.
 %% """
--spec del(key(), timestamp(), consistency(), replica()) -> del_reply().
+-spec del(key(), timestamp(), consistency(), replica()) -> del_reply() | {error, {name_not_found}}.
 del(Key, Ts, Consistency, Name) ->
     del(Key, Ts, Consistency, Name, true).
 del(Key, Ts, Consistency, Name, Retry) ->
@@ -123,7 +123,8 @@ del(Key, Ts, Consistency, Name, Retry) ->
 %% @doc """
 %% Puts the given value associated with the given key into the replica server.
 %% """
--spec put(key(), value(), timestamp(), consistency(), replica()) -> put_reply().
+-spec put(key(), value(), timestamp(), consistency(), replica()) ->
+    put_reply() | {error, {name_not_found}}.
 put(Key, Value, Ts, Consistency, Name) ->
     put(Key, Value, Ts, Consistency, Name, true).
 put(Key, Value, Ts, Consistency, Name, Retry) ->
