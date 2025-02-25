@@ -10,16 +10,18 @@ setup() ->
 
 cleanup() ->
     ok.
-start_bdd()->
+start_bdd() ->
     process_flag(trap_exit, true),
+    logger:add_handler_filter(default, ?MODULE, {fun(_, _) -> stop end, nostate}),
     Int = integer_to_list(erlang:unique_integer([monotonic])),
     Name = "bdd" ++ Int,
     base_de_datos:start(list_to_atom(Name), 10),
     Name.
 stop_bdd(Name) ->
+    logger:remove_handler_filter(default, ?MODULE),
     base_de_datos:stop(list_to_atom(Name)).
 
-replica_atom(Name,Int)->
+replica_atom(Name, Int) ->
     list_to_atom(Name ++ "_" ++ Int).
 
 put_get_test() ->
@@ -28,7 +30,7 @@ put_get_test() ->
     Value = value,
     Ts = get_ts(),
     ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, replica_atom(Name, "1"))),
-    ?assertEqual({ok, Value, Ts}, replica:get(Key, one,  replica_atom(Name, "5"))),
+    ?assertEqual({ok, Value, Ts}, replica:get(Key, one, replica_atom(Name, "5"))),
     stop_bdd(Name).
 
 del_get_test() ->
@@ -41,13 +43,58 @@ del_get_test() ->
     ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, Bdd1)),
     ?assertEqual({ok}, replica:del(Key, Ts, all, Bdd5)),
     ?assertEqual({ko, Ts}, replica:get(Key, one, Bdd5)).
+get_not_found_test() ->
+    Name = start_bdd(),
+    Key = key,
+    ?assertEqual({not_found}, replica:get(Key, one, replica_atom(Name, "1"))),
+    stop_bdd(Name).
+
+put_in_the_past_test() ->
+    Name = start_bdd(),
+    Key = key,
+    Value = value,
+    Ts = get_ts(),
+    ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, replica_atom(Name, "1"))),
+    ?assertEqual({ko}, replica:put(Key, Value, Ts - 1, quorum, replica_atom(Name, "1"))),
+    stop_bdd(Name).
+put_in_the_past_and_is_deleted_test() ->
+    Name = start_bdd(),
+    Key = key,
+    Value = value,
+    Ts = get_ts(),
+    ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, replica_atom(Name, "1"))),
+    ?assertEqual({ok}, replica:del(Key, Ts, all, replica_atom(Name, "1"))),
+    ?assertEqual({not_found}, replica:put(Key, Value, Ts - 1, quorum, replica_atom(Name, "1"))),
+    stop_bdd(Name).
+delete_in_the_past_and_is_deleted_test() ->
+    Name = start_bdd(),
+    Key = key,
+    Value = value,
+    Ts = get_ts(),
+    ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, replica_atom(Name, "1"))),
+    ?assertEqual({ok}, replica:del(Key, Ts, all, replica_atom(Name, "1"))),
+    ?assertEqual({not_found}, replica:del(Key, Ts - 1, all, replica_atom(Name, "1"))),
+    stop_bdd(Name).
+delete_in_the_past_test() ->
+    Name = start_bdd(),
+    Key = key,
+    Value = value,
+    Ts = get_ts(),
+    ?assertEqual({ok}, replica:put(Key, Value, Ts, quorum, replica_atom(Name, "1"))),
+    ?assertEqual({ko}, replica:del(Key, Ts - 1, all, replica_atom(Name, "1"))),
+    stop_bdd(Name).
 consistency_test() ->
     Name = start_bdd(),
     Key = key,
     Value = value,
     Ts = get_ts(),
     ?assertEqual({ok}, replica:put(Key, Value, Ts, all, replica_atom(Name, "1"))),
-    [?assertEqual({ok, Value, Ts}, replica:get(Key, one, replica_atom(Name, integer_to_list(Append)))) || Append <- lists:seq(2, 9)],
+    [
+        ?assertEqual(
+            {ok, Value, Ts}, replica:get(Key, one, replica_atom(Name, integer_to_list(Append)))
+        )
+     || Append <- lists:seq(2, 9)
+    ],
     stop_bdd(Name).
 fix_consistency_test() ->
     Name = start_bdd(),
