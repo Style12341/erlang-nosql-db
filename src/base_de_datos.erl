@@ -10,11 +10,13 @@
 
 %% Utility functions used in child specs
 -export([generate_replicas_names/3, generate_correct_arguments/2]).
+-type bdd_name() :: atom().
+-type replica_qty() :: non_neg_integer().
 
 %%--------------------------------------------------------------------
 %% API functions
 %%--------------------------------------------------------------------
--spec start(atom(), non_neg_integer()) -> {ok, pid()} | {error, term()}.
+-spec start(bdd_name(), replica_qty()) -> {ok, pid()} | {error, term()}.
 start(_,NegInt) when NegInt =< 0 -> {error, "CantReplicas must be a natural integer"};
 start(Name, CantReplicas) when is_atom(Name) ->
     %% Register the supervisor as 'nosql_db'
